@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dma-api"
+version = "0.1.0a0"
+description = "DMA HTTP API service."
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.112,<1", "uvicorn[standard]>=0.30,<1", "pydantic>=2.8,<3"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.6", "pyright>=1.1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dma_api"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,0 +1,210 @@
+openapi: 3.1.0
+info:
+  title: DMA API
+  version: 0.1.0
+  description: Versioned API for differentiated agent memory.
+servers:
+  - url: https://api.dma.dev
+security:
+  - bearerAuth: []
+paths:
+  /v1/memories:
+    post:
+      operationId: remember
+      summary: Persist a typed memory
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RememberRequest'
+      responses:
+        '201':
+          description: Memory created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '200':
+          description: Idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+    get:
+      operationId: listMemories
+      summary: List memories available to an agent
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+        - name: type
+          in: query
+          schema: { $ref: '#/components/schemas/MemoryType' }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of memories
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemoryPage' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /v1/memories/recall:
+    post:
+      operationId: recall
+      summary: Retrieve memories relevant to a query
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RecallRequest' }
+      responses:
+        '200':
+          description: Ranked memory results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecallResponse' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401': { $ref: '#/components/responses/Problem' }
+  /v1/memories/{memory_id}:
+    delete:
+      operationId: forget
+      summary: Delete one memory
+      parameters:
+        - $ref: '#/components/parameters/MemoryId'
+        - $ref: '#/components/parameters/AgentId'
+      responses:
+        '204': { description: Memory deleted }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /v1/memories/{memory_id}/explanation:
+    get:
+      operationId: explain
+      summary: Explain a memory's retrieval-relevant state
+      parameters:
+        - $ref: '#/components/parameters/MemoryId'
+        - $ref: '#/components/parameters/AgentId'
+      responses:
+        '200':
+          description: Explanation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemoryExplanation' }
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    AgentId:
+      name: agent_id
+      in: query
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 16, maxLength: 255 }
+    MemoryId:
+      name: memory_id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^mem_[A-Za-z0-9]+$' }
+  responses:
+    Problem:
+      description: RFC 9457 problem response
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    MemoryType:
+      type: string
+      enum: [episodic, semantic, procedural]
+    RememberRequest:
+      type: object
+      required: [agent_id, content, type]
+      properties:
+        agent_id: { type: string, minLength: 1, maxLength: 128 }
+        content: { type: string, minLength: 1, maxLength: 20000 }
+        type: { $ref: '#/components/schemas/MemoryType' }
+        expires_at: { type: [string, 'null'], format: date-time }
+        metadata: { type: object, additionalProperties: true, default: {} }
+    RecallRequest:
+      type: object
+      required: [agent_id, query]
+      properties:
+        agent_id: { type: string, minLength: 1, maxLength: 128 }
+        query: { type: string, minLength: 1, maxLength: 20000 }
+        types:
+          type: array
+          items: { $ref: '#/components/schemas/MemoryType' }
+          uniqueItems: true
+        limit: { type: integer, minimum: 1, maximum: 50, default: 5 }
+    Memory:
+      type: object
+      required: [id, agent_id, content, type, version, status, created_at, updated_at, metadata]
+      properties:
+        id: { type: string, pattern: '^mem_[A-Za-z0-9]+$' }
+        agent_id: { type: string }
+        content: { type: string }
+        type: { $ref: '#/components/schemas/MemoryType' }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [active, expired] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+        metadata: { type: object, additionalProperties: true }
+    RecallResult:
+      allOf:
+        - $ref: '#/components/schemas/Memory'
+        - type: object
+          required: [score]
+          properties:
+            score: { type: number, minimum: 0, maximum: 1 }
+    RecallResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/RecallResult' }
+    MemoryPage:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Memory' } }
+        next_cursor: { type: [string, 'null'] }
+    MemoryExplanation:
+      type: object
+      required: [memory_id, type, version, status, retrieval]
+      properties:
+        memory_id: { type: string }
+        type: { $ref: '#/components/schemas/MemoryType' }
+        version: { type: integer }
+        status: { type: string, enum: [active, expired] }
+        retrieval:
+          type: object
+          required: [strategy]
+          properties:
+            strategy: { type: string, example: lexical_fts }
+            matched_terms: { type: array, items: { type: string } }
+            filters_applied: { type: array, items: { type: string } }
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
