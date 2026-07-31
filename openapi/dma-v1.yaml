@@ -91,6 +91,10 @@ paths:
       parameters:
         - $ref: '#/components/parameters/MemoryId'
         - $ref: '#/components/parameters/AgentId'
+        - name: query
+          in: query
+          description: Optional query whose lexical matches should be explained.
+          schema: { type: string, minLength: 1, maxLength: 20000 }
       responses:
         '200':
           description: Explanation

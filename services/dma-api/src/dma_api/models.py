@@ -74,3 +74,22 @@ class RecallResult(MemoryResponse):
 
 class RecallResponse(BaseModel):
     results: list[RecallResult]
+
+
+class MemoryPage(BaseModel):
+    items: list[MemoryResponse]
+    next_cursor: str | None = None
+
+
+class RetrievalExplanation(BaseModel):
+    strategy: str
+    matched_terms: list[str] = Field(default_factory=list)
+    filters_applied: list[str]
+
+
+class MemoryExplanation(BaseModel):
+    memory_id: str
+    type: MemoryType
+    version: int
+    status: str
+    retrieval: RetrievalExplanation

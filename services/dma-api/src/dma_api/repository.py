@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -159,6 +160,63 @@ class SQLiteMemoryRepository:
             rows = connection.execute(statement, parameters).fetchall()
         return [(self._row_to_record(row), self._normalise_score(row["relevance"])) for row in rows]
 
+    def list_memories(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        memory_type: MemoryType | None,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[list[MemoryRecord], str | None]:
+        """List a stable, cursor-paginated view of one agent's records."""
+        where = ["tenant_id = ?", "agent_id = ?"]
+        parameters: list[object] = [tenant_id, agent_id]
+        if memory_type is not None:
+            where.append("type = ?")
+            parameters.append(memory_type.value)
+        if cursor:
+            created_at, memory_id = self._decode_cursor(cursor)
+            where.append("(created_at < ? OR (created_at = ? AND id < ?))")
+            parameters.extend([created_at, created_at, memory_id])
+        parameters.append(limit + 1)
+        statement = f"""
+            SELECT * FROM memories
+            WHERE {' AND '.join(where)}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+        """
+        with self._connect() as connection:
+            rows = connection.execute(statement, parameters).fetchall()
+        records = [self._row_to_record(row) for row in rows]
+        has_next_page = len(records) > limit
+        page = records[:limit]
+        next_cursor = self._encode_cursor(page[-1]) if has_next_page and page else None
+        return page, next_cursor
+
+    def get(self, *, tenant_id: str, agent_id: str, memory_id: str) -> MemoryRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM memories WHERE id = ? AND tenant_id = ? AND agent_id = ?",
+                (memory_id, tenant_id, agent_id),
+            ).fetchone()
+        return self._row_to_record(row) if row is not None else None
+
+    def delete(self, *, tenant_id: str, agent_id: str, memory_id: str) -> bool:
+        """Hard-delete a memory and all index/idempotency references to it."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT 1 FROM memories WHERE id = ? AND tenant_id = ? AND agent_id = ?",
+                (memory_id, tenant_id, agent_id),
+            ).fetchone()
+            if existing is None:
+                return False
+            connection.execute("DELETE FROM memory_search WHERE memory_id = ?", (memory_id,))
+            connection.execute("DELETE FROM idempotency_keys WHERE memory_id = ?", (memory_id,))
+            connection.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            return True
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path)
         connection.row_factory = sqlite3.Row
@@ -203,3 +261,20 @@ class SQLiteMemoryRepository:
         """Map FTS5's unbounded BM25 value to a stable public 0..1 score."""
         positive_relevance = max(float(relevance), 0.0)
         return positive_relevance / (1.0 + positive_relevance)
+
+    @staticmethod
+    def _encode_cursor(record: MemoryRecord) -> str:
+        raw = f"{record.created_at.isoformat()}|{record.id}".encode()
+        return urlsafe_b64encode(raw).decode().rstrip("=")
+
+    @staticmethod
+    def _decode_cursor(cursor: str) -> tuple[str, str]:
+        try:
+            padded = cursor + "=" * (-len(cursor) % 4)
+            created_at, memory_id = urlsafe_b64decode(padded).decode().split("|", maxsplit=1)
+            datetime.fromisoformat(created_at)
+            if not memory_id.startswith("mem_"):
+                raise ValueError
+        except (UnicodeDecodeError, ValueError) as error:
+            raise ValueError("invalid cursor") from error
+        return created_at, memory_id
