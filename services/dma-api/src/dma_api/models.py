@@ -50,3 +50,27 @@ class MemoryResponse(BaseModel):
     updated_at: datetime
     expires_at: datetime | None
     metadata: dict[str, Any]
+
+
+class RecallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str = Field(min_length=1, max_length=128)
+    query: str = Field(min_length=1, max_length=20_000)
+    types: list[MemoryType] | None = None
+    limit: int = Field(default=5, ge=1, le=50)
+
+    @field_validator("agent_id", "query")
+    @classmethod
+    def recall_fields_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
+class RecallResult(MemoryResponse):
+    score: float = Field(ge=0, le=1)
+
+
+class RecallResponse(BaseModel):
+    results: list[RecallResult]

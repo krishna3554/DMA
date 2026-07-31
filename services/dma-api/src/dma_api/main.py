@@ -9,7 +9,13 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 
 from dma_api.config import Settings
-from dma_api.models import MemoryResponse, RememberRequest
+from dma_api.models import (
+    MemoryResponse,
+    RecallRequest,
+    RecallResponse,
+    RecallResult,
+    RememberRequest,
+)
 from dma_api.repository import MemoryRecord, SQLiteMemoryRepository
 
 
@@ -64,6 +70,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             updated_at=stored.updated_at,
             expires_at=stored.expires_at,
             metadata=stored.metadata,
+        )
+
+    @app.post("/v1/memories/recall", response_model=RecallResponse)
+    def recall(payload: RecallRequest, tenant_id: str = Depends(authenticate)) -> RecallResponse:
+        matches = repository.recall(
+            tenant_id=tenant_id,
+            agent_id=payload.agent_id,
+            query=payload.query,
+            types=payload.types,
+            limit=payload.limit,
+            now=datetime.now(UTC),
+        )
+        return RecallResponse(
+            results=[
+                RecallResult(
+                    id=memory.id,
+                    agent_id=memory.agent_id,
+                    content=memory.content,
+                    type=memory.type,
+                    version=memory.version,
+                    created_at=memory.created_at,
+                    updated_at=memory.updated_at,
+                    expires_at=memory.expires_at,
+                    metadata=memory.metadata,
+                    score=score,
+                )
+                for memory, score in matches
+            ]
         )
 
     return app

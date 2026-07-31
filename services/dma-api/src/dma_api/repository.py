@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -50,6 +51,14 @@ class SQLiteMemoryRepository:
                 );
                 CREATE INDEX IF NOT EXISTS ix_memories_scope
                     ON memories(tenant_id, agent_id, type, created_at DESC);
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_search USING fts5(
+                    content,
+                    memory_id UNINDEXED,
+                    tenant_id UNINDEXED,
+                    agent_id UNINDEXED,
+                    type UNINDEXED,
+                    tokenize = 'unicode61'
+                );
                 CREATE TABLE IF NOT EXISTS idempotency_keys (
                     tenant_id TEXT NOT NULL,
                     operation TEXT NOT NULL,
@@ -96,12 +105,59 @@ class SQLiteMemoryRepository:
             )
             connection.execute(
                 """
+                INSERT INTO memory_search (content, memory_id, tenant_id, agent_id, type)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (record.content, record.id, record.tenant_id, record.agent_id, record.type.value),
+            )
+            connection.execute(
+                """
                 INSERT INTO idempotency_keys (tenant_id, operation, idempotency_key, memory_id)
                 VALUES (?, 'remember', ?, ?)
                 """,
                 (record.tenant_id, idempotency_key, record.id),
             )
             return record, True
+
+    def recall(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        query: str,
+        types: list[MemoryType] | None,
+        limit: int,
+        now: datetime,
+    ) -> list[tuple[MemoryRecord, float]]:
+        """Return lexical matches visible to the agent, ordered by FTS relevance."""
+        search_query = self._to_fts_query(query)
+        if not search_query:
+            return []
+
+        where = [
+            "memory_search MATCH ?",
+            "m.tenant_id = ?",
+            "m.agent_id = ?",
+            "(m.expires_at IS NULL OR m.expires_at > ?)",
+        ]
+        parameters: list[object] = [search_query, tenant_id, agent_id, now.isoformat()]
+        if types:
+            placeholders = ", ".join("?" for _ in types)
+            where.append(f"m.type IN ({placeholders})")
+            parameters.extend(memory_type.value for memory_type in types)
+        parameters.append(limit)
+
+        statement = f"""
+            SELECT m.*, -bm25(memory_search) AS relevance
+            FROM memory_search
+            JOIN memories AS m ON m.id = memory_search.memory_id
+            WHERE {' AND '.join(where)}
+            ORDER BY relevance DESC, m.created_at DESC
+            LIMIT ?
+        """
+        with self._connect() as connection:
+            rows = connection.execute(statement, parameters).fetchall()
+        return [(self._row_to_record(row), self._normalise_score(row["relevance"])) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._database_path)
@@ -114,6 +170,10 @@ class SQLiteMemoryRepository:
         row = connection.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
         if row is None:
             raise RuntimeError("idempotency record references a missing memory")
+        return SQLiteMemoryRepository._row_to_record(row)
+
+    @staticmethod
+    def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
         return MemoryRecord(
             id=row["id"],
             tenant_id=row["tenant_id"],
@@ -126,3 +186,20 @@ class SQLiteMemoryRepository:
             expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
             metadata=json.loads(row["metadata_json"]),
         )
+
+    @staticmethod
+    def _to_fts_query(query: str) -> str:
+        """Convert arbitrary user text to a safe OR query for SQLite FTS5.
+
+        BM25 ranks records matching more query terms above partial matches. OR prevents
+        a harmless wording variation (for example, ``prefer`` vs ``prefers``) from
+        producing an empty result set before semantic retrieval is introduced.
+        """
+        tokens = re.findall(r"[\w]+", query, flags=re.UNICODE)
+        return " OR ".join(f'"{token}"' for token in tokens)
+
+    @staticmethod
+    def _normalise_score(relevance: float) -> float:
+        """Map FTS5's unbounded BM25 value to a stable public 0..1 score."""
+        positive_relevance = max(float(relevance), 0.0)
+        return positive_relevance / (1.0 + positive_relevance)
