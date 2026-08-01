@@ -158,7 +158,15 @@ class SQLiteMemoryRepository:
         """
         with self._connect() as connection:
             rows = connection.execute(statement, parameters).fetchall()
-        return [(self._row_to_record(row), self._normalise_score(row["relevance"])) for row in rows]
+        records_with_relevance = [
+            (self._row_to_record(row), max(float(row["relevance"]), 0.0)) for row in rows
+        ]
+        if not records_with_relevance:
+            return []
+        top_relevance = max(relevance for _, relevance in records_with_relevance)
+        if top_relevance == 0:
+            return [(record, 0.0) for record, _ in records_with_relevance]
+        return [(record, relevance / top_relevance) for record, relevance in records_with_relevance]
 
     def list_memories(
         self,
@@ -255,12 +263,6 @@ class SQLiteMemoryRepository:
         """
         tokens = re.findall(r"[\w]+", query, flags=re.UNICODE)
         return " OR ".join(f'"{token}"' for token in tokens)
-
-    @staticmethod
-    def _normalise_score(relevance: float) -> float:
-        """Map FTS5's unbounded BM25 value to a stable public 0..1 score."""
-        positive_relevance = max(float(relevance), 0.0)
-        return positive_relevance / (1.0 + positive_relevance)
 
     @staticmethod
     def _encode_cursor(record: MemoryRecord) -> str:
