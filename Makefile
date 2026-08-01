@@ -16,10 +16,10 @@ benchmark:
 
 test:
 	PYTHONPATH=. $(API_PYTEST) -q services/dma-api/tests packages/dma-sdk-python/tests benchmarks/runner/tests
-	PYTHONPATH=. $(API_PYTEST) -q packages/dma-langgraph/tests
+	PYTHONPATH=. $(API_PYTEST) -q packages/dma-langgraph/tests packages/dma-mcp/tests
 
 lint:
-	$(API_RUFF) check services/dma-api/src services/dma-api/tests packages/dma-sdk-python/src packages/dma-sdk-python/tests packages/dma-langgraph benchmarks
+	$(API_RUFF) check services/dma-api/src services/dma-api/tests packages/dma-sdk-python/src packages/dma-sdk-python/tests packages/dma-langgraph packages/dma-mcp benchmarks
 
 typecheck:
 	cd services/dma-api && .venv/bin/pyright
