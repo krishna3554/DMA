@@ -42,6 +42,7 @@ For development verification, run `make check`.
 ## Repository layout
 
 - `packages/dma-sdk-python/` — developer-facing Python package
+- `packages/dma-langgraph/` — thin LangGraph reference adapter
 - `services/dma-api/` — hosted/self-hosted API service
 - `openapi/` — versioned public contract
 - `examples/` — runnable integrations

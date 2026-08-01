@@ -1,0 +1,8 @@
+{
+  "include": ["runner"],
+  "extraPaths": [".."],
+  "venvPath": "../services/dma-api",
+  "venv": ".venv",
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.11"
+}
