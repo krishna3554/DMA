@@ -28,7 +28,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Memory'
         '200':
-          description: Idempotent replay
+          description: Idempotent replay or an update to an exact normalized semantic duplicate
           content:
             application/json:
               schema:
