@@ -30,6 +30,9 @@ make example
 
 For development verification, run `make check`.
 
+GitHub Actions runs this quality gate plus the offline benchmark baselines on
+every pull request and on pushes to `main`.
+
 ### Local configuration
 
 | Variable | Default | Purpose |

@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Python quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v5
+      - name: Create isolated environment
+        run: uv venv services/dma-api/.venv --python python3
+      - name: Install DMA packages
+        run: >-
+          uv pip install --python services/dma-api/.venv/bin/python
+          -e 'services/dma-api[dev]'
+          -e packages/dma-sdk-python
+          -e packages/dma-langgraph
+      - name: Test, lint, and type-check
+        run: make check
+      - name: Run benchmark baselines
+        run: |
+          make benchmark
+          make classify-benchmark
