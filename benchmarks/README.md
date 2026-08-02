@@ -22,3 +22,11 @@ The JSON report includes:
 Do not compare latency across different machines. For quality comparisons,
 keep the fixture version and retrieval limit fixed, record the implementation
 version, and report all metrics rather than only the best one.
+
+## Classification evaluation
+
+`make classify-benchmark` runs the separate labeled memory-type fixture. The
+current rule baseline is free and deterministic. A Fireworks classifier must
+be evaluated on a held-out fixture and beat this baseline by a pre-agreed
+accuracy margin while recording model, prompt version, latency, and cost.
+Never use benchmark examples as few-shot examples for the same evaluation.
