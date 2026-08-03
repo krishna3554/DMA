@@ -36,6 +36,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="DMA API", version="0.1.0", lifespan=lifespan)
 
+    @app.get("/healthz", include_in_schema=False)
+    def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
     def authenticate(authorization: str | None = Header(default=None)) -> str:
         expected = f"Bearer {runtime_settings.api_key}"
         if authorization != expected:
