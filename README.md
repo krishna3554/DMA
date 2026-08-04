@@ -61,6 +61,18 @@ PostgreSQL is the planned multi-process deployment backend.
 GitHub Actions runs this quality gate plus the offline benchmark baselines on
 every pull request and on pushes to `main`.
 
+## Build distributable packages
+
+Before publishing a release, build the Python distributions locally:
+
+```bash
+make build
+```
+
+This produces source distributions and wheels for `dma-sdk`, `dma-langgraph`,
+and `dma-mcp` in each package's `dist/` directory. Publication to PyPI remains
+an explicit release action; v0.1 does not publish automatically from CI.
+
 ### Local configuration
 
 | Variable | Default | Purpose |

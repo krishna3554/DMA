@@ -28,6 +28,8 @@ jobs:
           -e packages/dma-langgraph
       - name: Test, lint, and type-check
         run: make check
+      - name: Build distributable packages
+        run: make build
       - name: Run benchmark baselines
         run: |
           make benchmark
