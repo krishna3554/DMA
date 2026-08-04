@@ -3,7 +3,7 @@ API_PYTEST := services/dma-api/.venv/bin/pytest
 API_RUFF := services/dma-api/.venv/bin/ruff
 API_PYRIGHT := services/dma-api/.venv/bin/pyright
 
-.PHONY: api example benchmark build test lint typecheck check
+.PHONY: api example benchmark build verify-wheels test lint typecheck check
 
 api:
 	DMA_DATABASE_PATH=.local/dma.db DMA_API_KEY=$${DMA_API_KEY:-dma-local-development-key} $(API_PYTHON) -m uvicorn dma_api.main:app --host 127.0.0.1 --port 8000 --reload
@@ -21,6 +21,9 @@ build:
 	uv build packages/dma-sdk-python
 	uv build packages/dma-langgraph
 	uv build packages/dma-mcp
+
+verify-wheels: build
+	bash scripts/verify_wheels.sh
 
 test:
 	PYTHONPATH=. $(API_PYTEST) -q services/dma-api/tests packages/dma-sdk-python/tests benchmarks/runner/tests

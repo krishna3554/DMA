@@ -30,6 +30,8 @@ jobs:
         run: make check
       - name: Build distributable packages
         run: make build
+      - name: Install built wheels in a fresh environment
+        run: make verify-wheels
       - name: Run benchmark baselines
         run: |
           make benchmark

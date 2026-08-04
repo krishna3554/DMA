@@ -73,6 +73,11 @@ This produces source distributions and wheels for `dma-sdk`, `dma-langgraph`,
 and `dma-mcp` in each package's `dist/` directory. Publication to PyPI remains
 an explicit release action; v0.1 does not publish automatically from CI.
 
+Run `make verify-wheels` to install the built artifacts into a fresh temporary
+environment. The container publishing target for v0.1 is GitHub Container
+Registry (GHCR). See `docs/releasing.md` for the TestPyPI, PyPI, and GHCR
+release workflow.
+
 ### Local configuration
 
 | Variable | Default | Purpose |
