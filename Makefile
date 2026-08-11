@@ -3,7 +3,7 @@ API_PYTEST := services/dma-api/.venv/bin/pytest
 API_RUFF := services/dma-api/.venv/bin/ruff
 API_PYRIGHT := services/dma-api/.venv/bin/pyright
 
-.PHONY: api example benchmark build verify-wheels test lint typecheck check
+.PHONY: api example benchmark generate-memory-eval memory-eval build verify-wheels test lint typecheck check
 
 api:
 	DMA_DATABASE_PATH=.local/dma.db DMA_API_KEY=$${DMA_API_KEY:-dma-local-development-key} $(API_PYTHON) -m uvicorn dma_api.main:app --host 127.0.0.1 --port 8000 --reload
@@ -16,6 +16,12 @@ benchmark:
 
 classify-benchmark:
 	$(API_PYTHON) -m benchmarks.runner.classification
+
+generate-memory-eval:
+	$(API_PYTHON) -m benchmarks.runner.generate_memory_eval
+
+memory-eval:
+	$(API_PYTHON) -m benchmarks.runner.memory_eval --failures-output benchmarks/results/v0.1-failures.jsonl
 
 build:
 	uv build packages/dma-sdk-python
