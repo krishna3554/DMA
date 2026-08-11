@@ -1,0 +1,17 @@
+services:
+  dma-api:
+    build:
+      context: .
+    ports:
+      - "8000:8000"
+    environment:
+      DMA_ENVIRONMENT: production
+      DMA_API_KEY: ${DMA_API_KEY:?Set DMA_API_KEY before starting DMA}
+      DMA_TENANT_ID: ${DMA_TENANT_ID:-self-hosted}
+      DMA_DATABASE_PATH: /data/dma.db
+    volumes:
+      - dma-data:/data
+    restart: unless-stopped
+
+volumes:
+  dma-data:

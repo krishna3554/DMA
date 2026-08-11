@@ -1,0 +1,6 @@
+{"id":"c1","content":"Yesterday we decided to keep the SDK synchronous.","expected_type":"episodic"}
+{"id":"c2","content":"User prefers Java Spring Boot for backend work.","expected_type":"semantic"}
+{"id":"c3","content":"Always run tests before opening a pull request.","expected_type":"procedural"}
+{"id":"c4","content":"The incident review happened last Friday.","expected_type":"episodic"}
+{"id":"c5","content":"The user works primarily with PostgreSQL.","expected_type":"semantic"}
+{"id":"c6","content":"Deploy by tagging the release and running the production workflow.","expected_type":"procedural"}

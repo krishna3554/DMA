@@ -47,6 +47,19 @@ def test_remember_replays_an_idempotency_key(tmp_path) -> None:
     assert second.json()["id"] == first.json()["id"]
 
 
+def test_remember_versions_duplicate_semantic_memory(tmp_path) -> None:
+    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key", tenant_id="tenant-a"))
+    payload = {"agent_id": "coding-agent", "content": "User prefers Java Spring Boot.", "type": "semantic"}
+    with TestClient(app) as client:
+        first = client.post("/v1/memories", headers={**_headers(), "Idempotency-Key": "semantic-first-0001"}, json=payload)
+        second = client.post("/v1/memories", headers={**_headers(), "Idempotency-Key": "semantic-second-001"}, json={**payload, "content": "  user prefers java spring boot. "})
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["version"] == 2
+
+
 def test_remember_requires_valid_authentication(tmp_path) -> None:
     app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key"))
     with TestClient(app) as client:

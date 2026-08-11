@@ -84,6 +84,30 @@ class SQLiteMemoryRepository:
             if existing is not None:
                 return self._get_by_id(connection, existing["memory_id"]), False
 
+            if record.type is MemoryType.SEMANTIC:
+                duplicate = self._find_normalized_semantic(connection, record)
+                if duplicate is not None:
+                    updated = MemoryRecord(
+                        id=duplicate.id,
+                        tenant_id=duplicate.tenant_id,
+                        agent_id=duplicate.agent_id,
+                        content=record.content,
+                        type=record.type,
+                        version=duplicate.version + 1,
+                        created_at=duplicate.created_at,
+                        updated_at=record.updated_at,
+                        expires_at=record.expires_at,
+                        metadata=record.metadata,
+                    )
+                    connection.execute(
+                        """UPDATE memories SET content = ?, version = ?, updated_at = ?, expires_at = ?, metadata_json = ? WHERE id = ?""",
+                        (updated.content, updated.version, updated.updated_at.isoformat(), updated.expires_at.isoformat() if updated.expires_at else None, json.dumps(updated.metadata, separators=(",", ":"), sort_keys=True), updated.id),
+                    )
+                    connection.execute("DELETE FROM memory_search WHERE memory_id = ?", (updated.id,))
+                    connection.execute("INSERT INTO memory_search (content, memory_id, tenant_id, agent_id, type) VALUES (?, ?, ?, ?, ?)", (updated.content, updated.id, updated.tenant_id, updated.agent_id, updated.type.value))
+                    connection.execute("INSERT INTO idempotency_keys (tenant_id, operation, idempotency_key, memory_id) VALUES (?, 'remember', ?, ?)", (record.tenant_id, idempotency_key, updated.id))
+                    return updated, False
+
             connection.execute(
                 """
                 INSERT INTO memories (
@@ -119,6 +143,15 @@ class SQLiteMemoryRepository:
                 (record.tenant_id, idempotency_key, record.id),
             )
             return record, True
+
+    def _find_normalized_semantic(self, connection: sqlite3.Connection, record: MemoryRecord) -> MemoryRecord | None:
+        rows = connection.execute("SELECT * FROM memories WHERE tenant_id = ? AND agent_id = ? AND type = 'semantic'", (record.tenant_id, record.agent_id)).fetchall()
+        normalized = self._normalise_semantic(record.content)
+        for row in rows:
+            candidate = self._row_to_record(row)
+            if self._normalise_semantic(candidate.content) == normalized:
+                return candidate
+        return None
 
     def recall(
         self,
@@ -263,6 +296,10 @@ class SQLiteMemoryRepository:
         """
         tokens = re.findall(r"[\w]+", query, flags=re.UNICODE)
         return " OR ".join(f'"{token}"' for token in tokens)
+
+    @staticmethod
+    def _normalise_semantic(content: str) -> str:
+        return " ".join(content.split()).casefold()
 
     @staticmethod
     def _encode_cursor(record: MemoryRecord) -> str:

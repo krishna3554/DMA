@@ -1,0 +1,162 @@
+name: Release Python Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Package index to publish to"
+        required: true
+        type: choice
+        options:
+          - testpypi
+          - pypi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - name: Build packages
+        run: make build
+      - name: Install built wheels in a fresh environment
+        run: make verify-wheels
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: |
+            packages/dma-sdk-python/dist/*
+            packages/dma-langgraph/dist/*
+            packages/dma-mcp/dist/*
+          if-no-files-found: error
+
+  publish-sdk-testpypi:
+    name: Publish dma-sdk to TestPyPI
+    needs: build
+    if: ${{ inputs.target == 'testpypi' }}
+    runs-on: ubuntu-latest
+    environment: testpypi-dma-sdk
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
+      - name: Publish dma-sdk to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/packages/dma-sdk-python/dist
+
+  publish-langgraph-testpypi:
+    name: Publish dma-langgraph to TestPyPI
+    needs: build
+    if: ${{ inputs.target == 'testpypi' }}
+    runs-on: ubuntu-latest
+    environment: testpypi-dma-langgraph
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
+      - name: Publish dma-langgraph to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/packages/dma-langgraph/dist
+
+  publish-mcp-testpypi:
+    name: Publish dma-mcp to TestPyPI
+    needs: build
+    if: ${{ inputs.target == 'testpypi' }}
+    runs-on: ubuntu-latest
+    environment: testpypi-dma-mcp
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
+      - name: Publish dma-mcp to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/packages/dma-mcp/dist
+
+  publish-sdk-pypi:
+    name: Publish dma-sdk to PyPI
+    needs: build
+    if: ${{ inputs.target == 'pypi' }}
+    runs-on: ubuntu-latest
+    environment: pypi-dma-sdk
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
+      - name: Publish dma-sdk to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/packages/dma-sdk-python/dist
+
+  publish-langgraph-pypi:
+    name: Publish dma-langgraph to PyPI
+    needs: build
+    if: ${{ inputs.target == 'pypi' }}
+    runs-on: ubuntu-latest
+    environment: pypi-dma-langgraph
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
+      - name: Publish dma-langgraph to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/packages/dma-langgraph/dist
+
+  publish-mcp-pypi:
+    name: Publish dma-mcp to PyPI
+    needs: build
+    if: ${{ inputs.target == 'pypi' }}
+    runs-on: ubuntu-latest
+    environment: pypi-dma-mcp
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
+      - name: Publish dma-mcp to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/packages/dma-mcp/dist

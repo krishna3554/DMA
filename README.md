@@ -30,6 +30,54 @@ make example
 
 For development verification, run `make check`.
 
+## Self-host with Docker
+
+v0.1 is self-hosted. Docker Compose runs the API in production mode and stores
+SQLite data in the persistent `dma-data` volume.
+
+```bash
+cp .env.example .env
+# Edit .env and replace DMA_API_KEY with a long random secret.
+docker compose up --build -d
+curl http://localhost:8000/healthz
+```
+
+Connect an agent with the SDK:
+
+```python
+from dma import DMAClient
+
+memory = DMAClient(
+    api_key="the-secret-from-your-env-file",
+    agent_id="coding-agent",
+    base_url="http://localhost:8000",
+)
+```
+
+For a public deployment, put the API behind HTTPS and restrict database-volume
+access to the host. SQLite is appropriate for a single self-hosted instance;
+PostgreSQL is the planned multi-process deployment backend.
+
+GitHub Actions runs this quality gate plus the offline benchmark baselines on
+every pull request and on pushes to `main`.
+
+## Build distributable packages
+
+Before publishing a release, build the Python distributions locally:
+
+```bash
+make build
+```
+
+This produces source distributions and wheels for `dma-sdk`, `dma-langgraph`,
+and `dma-mcp` in each package's `dist/` directory. Publication to PyPI remains
+an explicit release action; v0.1 does not publish automatically from CI.
+
+Run `make verify-wheels` to install the built artifacts into a fresh temporary
+environment. The container publishing target for v0.1 is GitHub Container
+Registry (GHCR). See `docs/releasing.md` for the TestPyPI, PyPI, and GHCR
+release workflow.
+
 ### Local configuration
 
 | Variable | Default | Purpose |
@@ -37,6 +85,7 @@ For development verification, run `make check`.
 | `DMA_API_KEY` | `dma-local-development-key` | Local bearer token; replace outside development. |
 | `DMA_TENANT_ID` | `local` | Tenant scope associated with the local API key. |
 | `DMA_DATABASE_PATH` | `./dma.db` | SQLite database path. |
+| `DMA_ENVIRONMENT` | `development` | Set to `production` to reject the insecure default API key. |
 | `DMA_BASE_URL` | `http://127.0.0.1:8000` | API base URL used by the example. |
 
 ## Repository layout

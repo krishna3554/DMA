@@ -22,6 +22,7 @@ context = memory.recall(query="What backend stack does the user prefer?")
 - `remember`, `recall`, `forget`, `list`, and `explain` SDK operations.
 - A versioned HTTP API and OpenAPI specification.
 - Deterministic full-text retrieval, lifecycle filters, and explanation payloads.
+- Exact normalized semantic duplicates update one record and increment its version.
 - SQLite for local development, with PostgreSQL migration support designed into the persistence interface.
 - Idempotent writes, pagination, typed errors, test coverage, and an initial benchmark fixture.
 
@@ -45,3 +46,4 @@ Explicit types prove the differentiated-memory model without relying on probabil
 - No content is emitted in logs by default.
 - Deletion semantics and retention must be documented and tested.
 - Public request/response shapes are compatibility-tested against OpenAPI.
+- Semantic deduplication is deterministic; semantic conflict inference remains opt-in future work.
