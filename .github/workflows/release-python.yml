@@ -28,14 +28,23 @@ jobs:
         run: make build
       - name: Install built wheels in a fresh environment
         run: make verify-wheels
-      - name: Upload release artifacts
+      - name: Upload dma-sdk artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: python-distributions
-          path: |
-            packages/dma-sdk-python/dist/*
-            packages/dma-langgraph/dist/*
-            packages/dma-mcp/dist/*
+          name: dma-sdk-distributions
+          path: packages/dma-sdk-python/dist/*
+          if-no-files-found: error
+      - name: Upload dma-langgraph artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dma-langgraph-distributions
+          path: packages/dma-langgraph/dist/*
+          if-no-files-found: error
+      - name: Upload dma-mcp artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dma-mcp-distributions
+          path: packages/dma-mcp/dist/*
           if-no-files-found: error
 
   publish-sdk-testpypi:
@@ -51,13 +60,13 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
-          name: python-distributions
+          name: dma-sdk-distributions
           path: dist
       - name: Publish dma-sdk to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          packages-dir: dist/packages/dma-sdk-python/dist
+          packages-dir: dist
 
   publish-langgraph-testpypi:
     name: Publish dma-langgraph to TestPyPI
@@ -72,13 +81,13 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
-          name: python-distributions
+          name: dma-langgraph-distributions
           path: dist
       - name: Publish dma-langgraph to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          packages-dir: dist/packages/dma-langgraph/dist
+          packages-dir: dist
 
   publish-mcp-testpypi:
     name: Publish dma-mcp to TestPyPI
@@ -93,13 +102,13 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
-          name: python-distributions
+          name: dma-mcp-distributions
           path: dist
       - name: Publish dma-mcp to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          packages-dir: dist/packages/dma-mcp/dist
+          packages-dir: dist
 
   publish-sdk-pypi:
     name: Publish dma-sdk to PyPI
@@ -114,12 +123,12 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
-          name: python-distributions
+          name: dma-sdk-distributions
           path: dist
       - name: Publish dma-sdk to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: dist/packages/dma-sdk-python/dist
+          packages-dir: dist
 
   publish-langgraph-pypi:
     name: Publish dma-langgraph to PyPI
@@ -134,12 +143,12 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
-          name: python-distributions
+          name: dma-langgraph-distributions
           path: dist
       - name: Publish dma-langgraph to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: dist/packages/dma-langgraph/dist
+          packages-dir: dist
 
   publish-mcp-pypi:
     name: Publish dma-mcp to PyPI
@@ -154,9 +163,9 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
-          name: python-distributions
+          name: dma-mcp-distributions
           path: dist
       - name: Publish dma-mcp to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: dist/packages/dma-mcp/dist
+          packages-dir: dist
