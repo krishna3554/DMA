@@ -12,6 +12,70 @@ from pathlib import Path
 
 from dma_api.models import MemoryType
 
+_CURRENT_MARKERS = {"now", "current", "currently", "latest", "newer", "active"}
+_STOPWORDS = {
+    "a",
+    "after",
+    "an",
+    "and",
+    "be",
+    "before",
+    "can",
+    "does",
+    "for",
+    "happen",
+    "how",
+    "is",
+    "it",
+    "now",
+    "of",
+    "on",
+    "or",
+    "should",
+    "the",
+    "to",
+    "use",
+    "used",
+    "user",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+}
+_QUERY_EXPANSIONS = {
+    "adapter": {"adapter", "langgraph", "mcp"},
+    "api": {"api", "apis", "openapi", "rest"},
+    "classification": {"classification", "classifier", "accuracy"},
+    "client": {"client", "api_key", "agent_id", "scope", "tenant"},
+    "cloud": {"cloud", "aws", "gcp"},
+    "command": {"command", "make"},
+    "conflict": {"conflict", "newer", "older", "preference"},
+    "credit": {"credit", "credits", "fireworks", "offline"},
+    "credits": {"credit", "credits", "fireworks", "offline"},
+    "design": {"design", "openapi", "rest"},
+    "example": {"example", "examples", "python"},
+    "framework": {"framework", "langgraph", "django", "spring"},
+    "hosting": {"hosting", "hosted", "self"},
+    "language": {"language", "python", "typescript"},
+    "logging": {"logging", "logs", "json"},
+    "metric": {"metric", "metrics", "accuracy", "recall", "mrr"},
+    "migration": {"migration", "migrations", "alembic", "schema"},
+    "model": {"model", "fireworks", "offline", "benchmark"},
+    "package": {"package", "packages", "pypi", "dma", "sdk", "langgraph", "mcp"},
+    "packages": {"package", "packages", "pypi", "dma", "sdk", "langgraph", "mcp"},
+    "preference": {"preference", "preferences", "newer", "older"},
+    "provider": {"provider", "aws", "gcp"},
+    "release": {"release", "alpha", "self", "hosted", "pypi"},
+    "retrieval": {"retrieval", "recall", "lexical", "vector"},
+    "scope": {"scope", "api_key", "agent_id", "tenant"},
+    "style": {"style", "openapi", "rest", "lexical"},
+    "support": {"support", "ecosystem", "adapter", "mcp"},
+    "tool": {"tool", "alembic"},
+}
+
 
 @dataclass(frozen=True, slots=True)
 class MemoryRecord:
@@ -191,9 +255,15 @@ class SQLiteMemoryRepository:
         """
         with self._connect() as connection:
             rows = connection.execute(statement, parameters).fetchall()
-        records_with_relevance = [
-            (self._row_to_record(row), max(float(row["relevance"]), 0.0)) for row in rows
-        ]
+        query_tokens = self._important_tokens(query)
+        records_with_relevance = []
+        for row in rows:
+            record = self._row_to_record(row)
+            if not self._passes_precision_filter(query, query_tokens, record.content):
+                continue
+            overlap = self._overlap_score(query_tokens, record.content)
+            current_boost = 0.25 if self._asks_for_current(query) and self._has_current_marker(record.content) else 0
+            records_with_relevance.append((record, max(float(row["relevance"]), 0.0) + overlap + current_boost))
         if not records_with_relevance:
             return []
         top_relevance = max(relevance for _, relevance in records_with_relevance)
@@ -294,8 +364,95 @@ class SQLiteMemoryRepository:
         a harmless wording variation (for example, ``prefer`` vs ``prefers``) from
         producing an empty result set before semantic retrieval is introduced.
         """
-        tokens = re.findall(r"[\w]+", query, flags=re.UNICODE)
-        return " OR ".join(f'"{token}"' for token in tokens)
+        tokens = SQLiteMemoryRepository._expanded_tokens(query)
+        terms = []
+        for token in tokens:
+            terms.append(f'"{token}"')
+            if len(token) > 3:
+                terms.append(f"{token}*")
+        return " OR ".join(terms)
+
+    @classmethod
+    def _passes_precision_filter(cls, query: str, query_tokens: set[str], content: str) -> bool:
+        if cls._asks_for_current(query) and not cls._has_current_marker(content):
+            return False
+        if not query_tokens:
+            return False
+        overlap = cls._matching_tokens(query_tokens, content)
+        if len(query_tokens) == 1:
+            return len(overlap) == 1
+        return len(overlap) >= 2 or len(overlap) / len(query_tokens) >= 0.5
+
+    @classmethod
+    def _overlap_score(cls, query_tokens: set[str], content: str) -> float:
+        if not query_tokens:
+            return 0.0
+        return len(cls._matching_tokens(query_tokens, content)) / len(query_tokens)
+
+    @classmethod
+    def _matching_tokens(cls, query_tokens: set[str], content: str) -> set[str]:
+        content_tokens = cls._content_tokens(content)
+        return {
+            query_token
+            for query_token in query_tokens
+            if any(cls._tokens_match(query_token, content_token) for content_token in content_tokens)
+        }
+
+    @classmethod
+    def _important_tokens(cls, text: str) -> set[str]:
+        return cls._expand_tokens({
+            token
+            for token in (cls._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
+            if token and token not in _STOPWORDS and len(token) > 2
+        })
+
+    @classmethod
+    def _expanded_tokens(cls, text: str) -> set[str]:
+        return cls._expand_tokens({
+            token
+            for token in (cls._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
+            if token and len(token) > 2
+        })
+
+    @staticmethod
+    def _expand_tokens(tokens: set[str]) -> set[str]:
+        expanded = set(tokens)
+        for token in tokens:
+            expanded.update(_QUERY_EXPANSIONS.get(token, set()))
+        return expanded
+
+    @classmethod
+    def _content_tokens(cls, text: str) -> set[str]:
+        return {
+            token
+            for token in (cls._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
+            if token and len(token) > 2
+        }
+
+    @staticmethod
+    def _normalise_token(token: str) -> str:
+        token = token.casefold()
+        if len(token) > 4 and token.endswith("ies"):
+            return f"{token[:-3]}y"
+        if len(token) > 4 and token.endswith("s"):
+            return token[:-1]
+        return token
+
+    @staticmethod
+    def _tokens_match(query_token: str, content_token: str) -> bool:
+        return (
+            query_token == content_token
+            or (len(query_token) >= 3 and query_token in content_token)
+            or (len(content_token) >= 3 and content_token in query_token)
+        )
+
+    @classmethod
+    def _asks_for_current(cls, query: str) -> bool:
+        return bool(cls._important_tokens(query).intersection(_CURRENT_MARKERS) or {"now", "current", "latest"}.intersection(cls._content_tokens(query)))
+
+    @classmethod
+    def _has_current_marker(cls, content: str) -> bool:
+        return bool(cls._content_tokens(content).intersection(_CURRENT_MARKERS))
 
     @staticmethod
     def _normalise_semantic(content: str) -> str:
