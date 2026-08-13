@@ -61,6 +61,108 @@ PostgreSQL is the planned multi-process deployment backend.
 GitHub Actions runs this quality gate plus the offline benchmark baselines on
 every pull request and on pushes to `main`.
 
+## Use DMA with CLI agents
+
+DMA can be used from CLI coding agents such as OpenCode, Claude Code, Hermes
+Agent, or other local agent runners when the tool can do one of three things:
+
+- run Python code that imports `dma-sdk`
+- call the DMA HTTP API directly
+- launch an MCP server
+
+The recommended v0.1 integration shape is:
+
+```text
+CLI agent -> dma-mcp or small wrapper -> dma-sdk -> self-hosted DMA API -> SQLite
+```
+
+Use a stable `agent_id` per tool so memories stay scoped and benchmarks can
+compare behavior by agent:
+
+```text
+opencode-agent
+claude-code-agent
+hermes-agent
+```
+
+### Option 1: Python SDK
+
+Install the SDK into the environment used by the CLI tool or wrapper:
+
+```bash
+python -m pip install dma-sdk==0.1.0a0
+```
+
+Use the same API key and base URL as your self-hosted server:
+
+```python
+from dma import DMAClient
+
+memory = DMAClient(
+    api_key="the-secret-from-your-env-file",
+    agent_id="claude-code-agent",
+    base_url="http://localhost:8000",
+)
+
+memory.remember(
+    content="User prefers Java Spring Boot for backend APIs",
+    type="semantic",
+)
+
+context = memory.recall("what backend stack does the user prefer?")
+```
+
+This path is useful for custom wrappers around OpenCode, Hermes Agent, or any
+agent runner that lets you add Python hooks.
+
+### Option 2: Direct HTTP
+
+Any CLI tool that can call shell commands can use the DMA API directly:
+
+```bash
+curl -X POST http://localhost:8000/v1/memories/recall \
+  -H "Authorization: Bearer the-secret-from-your-env-file" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "opencode-agent",
+    "query": "what backend stack does the user prefer?",
+    "limit": 3
+  }'
+```
+
+This path is simple for early experiments, but SDK or MCP integration usually
+gives better ergonomics.
+
+### Option 3: MCP server
+
+For tools that support MCP servers, install `dma-mcp`:
+
+```bash
+python -m pip install dma-mcp==0.1.0a0
+```
+
+Configure the tool to launch:
+
+```bash
+dma-mcp
+```
+
+with environment variables:
+
+```bash
+DMA_API_KEY=the-secret-from-your-env-file
+DMA_BASE_URL=http://localhost:8000
+DMA_MCP_AGENT_ID=claude-code-agent
+```
+
+Use this path for Claude Code-style integrations because MCP is designed for
+tool and memory servers. Each external agent should get its own
+`DMA_MCP_AGENT_ID` unless you intentionally want shared memory.
+
+For real-world evaluation, run the same project twice: once without DMA and
+once with DMA enabled. Compare preference adherence, repeated corrections,
+irrelevant recalls, useful recalls, task completion time, and added latency.
+
 ## Build distributable packages
 
 Before publishing a release, build the Python distributions locally:
