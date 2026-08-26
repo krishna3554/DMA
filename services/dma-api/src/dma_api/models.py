@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 
 class MemoryType(StrEnum):
@@ -21,7 +21,7 @@ class RememberRequest(BaseModel):
     agent_id: str = Field(min_length=1, max_length=128)
     content: str = Field(min_length=1, max_length=20_000)
     type: MemoryType
-    expires_at: datetime | None = None
+    expires_at: AwareDatetime | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("agent_id", "content")
