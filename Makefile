@@ -42,6 +42,7 @@ typecheck:
 	cd services/dma-api && .venv/bin/pyright
 	cd packages/dma-sdk-python && ../../services/dma-api/.venv/bin/pyright
 	cd packages/dma-langgraph && ../../services/dma-api/.venv/bin/pyright
+	cd packages/dma-mcp && ../../services/dma-api/.venv/bin/pyright
 	cd benchmarks && ../services/dma-api/.venv/bin/pyright
 
 check: test lint typecheck
