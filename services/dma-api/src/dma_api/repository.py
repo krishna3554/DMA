@@ -6,11 +6,15 @@ import json
 import re
 import sqlite3
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from dma_api.models import MemoryType
+
+_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
 
 _CURRENT_MARKERS = {"now", "current", "currently", "latest", "newer", "active"}
 _STOPWORDS = {
@@ -99,7 +103,8 @@ class SQLiteMemoryRepository:
 
     def initialize(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        with self._transaction() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS memories (
@@ -136,7 +141,7 @@ class SQLiteMemoryRepository:
 
     def create_or_get(self, record: MemoryRecord, idempotency_key: str) -> tuple[MemoryRecord, bool]:
         """Create a record, or return the result of an exact idempotent replay."""
-        with self._connect() as connection:
+        with self._transaction() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 """
@@ -253,7 +258,7 @@ class SQLiteMemoryRepository:
             ORDER BY relevance DESC, m.created_at DESC
             LIMIT ?
         """
-        with self._connect() as connection:
+        with self._transaction() as connection:
             rows = connection.execute(statement, parameters).fetchall()
         query_tokens = self._important_tokens(query)
         records_with_relevance = []
@@ -301,7 +306,7 @@ class SQLiteMemoryRepository:
             ORDER BY created_at DESC, id DESC
             LIMIT ?
         """
-        with self._connect() as connection:
+        with self._transaction() as connection:
             rows = connection.execute(statement, parameters).fetchall()
         records = [self._row_to_record(row) for row in rows]
         has_next_page = len(records) > limit
@@ -310,7 +315,7 @@ class SQLiteMemoryRepository:
         return page, next_cursor
 
     def get(self, *, tenant_id: str, agent_id: str, memory_id: str) -> MemoryRecord | None:
-        with self._connect() as connection:
+        with self._transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM memories WHERE id = ? AND tenant_id = ? AND agent_id = ?",
                 (memory_id, tenant_id, agent_id),
@@ -319,7 +324,7 @@ class SQLiteMemoryRepository:
 
     def delete(self, *, tenant_id: str, agent_id: str, memory_id: str) -> bool:
         """Hard-delete a memory and all index/idempotency references to it."""
-        with self._connect() as connection:
+        with self._transaction() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT 1 FROM memories WHERE id = ? AND tenant_id = ? AND agent_id = ?",
@@ -333,10 +338,22 @@ class SQLiteMemoryRepository:
             return True
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._database_path)
+        """Open a configured connection; prefer :meth:`_transaction` for cleanup."""
+        connection = sqlite3.connect(self._database_path, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(f"PRAGMA busy_timeout = {int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}")
         return connection
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection whose work commits on success and is always closed."""
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _get_by_id(connection: sqlite3.Connection, memory_id: str) -> MemoryRecord:
