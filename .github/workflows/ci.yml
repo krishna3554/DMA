@@ -26,6 +26,7 @@ jobs:
           -e 'services/dma-api[dev]'
           -e packages/dma-sdk-python
           -e packages/dma-langgraph
+          -e packages/dma-mcp
       - name: Test, lint, and type-check
         run: make check
       - name: Build distributable packages
