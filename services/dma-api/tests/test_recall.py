@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
 from dma_api.config import Settings
 from dma_api.main import create_app
+from dma_api.models import MemoryType
+from dma_api.repository import MemoryRecord, SQLiteMemoryRepository
 
 
 def _headers(key: str) -> dict[str, str]:
@@ -59,3 +61,38 @@ def test_recall_excludes_expired_and_non_matching_types(tmp_path) -> None:
 
     assert response.status_code == 200
     assert [item["type"] for item in response.json()["results"]] == ["procedural"]
+
+
+def test_recall_includes_memories_expiring_after_now_regardless_of_offset(tmp_path) -> None:
+    """A non-UTC expiry must not be treated as expired by lexical comparison."""
+    repository = SQLiteMemoryRepository(tmp_path / "dma.db")
+    repository.initialize()
+    now = datetime(2026, 8, 27, 20, 0, 0, tzinfo=UTC)
+    expires_soon = datetime(2026, 8, 27, 10, 0, 0, tzinfo=timezone(timedelta(hours=-11)))
+    assert expires_soon.astimezone(UTC) > now
+    repository.create_or_get(
+        MemoryRecord(
+            id="mem_offsetexpiry00000000000001",
+            tenant_id="tenant-a",
+            agent_id="coding-agent",
+            content="Staging cluster deployment notes.",
+            type=MemoryType.EPISODIC,
+            version=1,
+            created_at=now,
+            updated_at=now,
+            expires_at=expires_soon,
+            metadata={},
+        ),
+        "idempotency-offset-expiry-0001",
+    )
+
+    matches = repository.recall(
+        tenant_id="tenant-a",
+        agent_id="coding-agent",
+        query="staging cluster deployment",
+        types=None,
+        limit=5,
+        now=now,
+    )
+
+    assert [record.id for record, _ in matches] == ["mem_offsetexpiry00000000000001"]

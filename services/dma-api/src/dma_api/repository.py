@@ -7,7 +7,7 @@ import re
 import sqlite3
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dma_api.models import MemoryType
@@ -165,7 +165,7 @@ class SQLiteMemoryRepository:
                     )
                     connection.execute(
                         """UPDATE memories SET content = ?, version = ?, updated_at = ?, expires_at = ?, metadata_json = ? WHERE id = ?""",
-                        (updated.content, updated.version, updated.updated_at.isoformat(), updated.expires_at.isoformat() if updated.expires_at else None, json.dumps(updated.metadata, separators=(",", ":"), sort_keys=True), updated.id),
+                        (updated.content, updated.version, self._utc_isoformat(updated.updated_at), self._utc_isoformat(updated.expires_at) if updated.expires_at else None, json.dumps(updated.metadata, separators=(",", ":"), sort_keys=True), updated.id),
                     )
                     connection.execute("DELETE FROM memory_search WHERE memory_id = ?", (updated.id,))
                     connection.execute("INSERT INTO memory_search (content, memory_id, tenant_id, agent_id, type) VALUES (?, ?, ?, ?, ?)", (updated.content, updated.id, updated.tenant_id, updated.agent_id, updated.type.value))
@@ -186,9 +186,9 @@ class SQLiteMemoryRepository:
                     record.content,
                     record.type.value,
                     record.version,
-                    record.created_at.isoformat(),
-                    record.updated_at.isoformat(),
-                    record.expires_at.isoformat() if record.expires_at else None,
+                    self._utc_isoformat(record.created_at),
+                    self._utc_isoformat(record.updated_at),
+                    self._utc_isoformat(record.expires_at) if record.expires_at else None,
                     json.dumps(record.metadata, separators=(",", ":"), sort_keys=True),
                 ),
             )
@@ -238,7 +238,7 @@ class SQLiteMemoryRepository:
             "m.agent_id = ?",
             "(m.expires_at IS NULL OR m.expires_at > ?)",
         ]
-        parameters: list[object] = [search_query, tenant_id, agent_id, now.isoformat()]
+        parameters: list[object] = [search_query, tenant_id, agent_id, self._utc_isoformat(now)]
         if types:
             placeholders = ", ".join("?" for _ in types)
             where.append(f"m.type IN ({placeholders})")
@@ -459,8 +459,19 @@ class SQLiteMemoryRepository:
         return " ".join(content.split()).casefold()
 
     @staticmethod
+    def _utc_isoformat(value: datetime) -> str:
+        """Serialise a datetime so lexical comparison matches chronological order.
+
+        Timestamps are stored with a fixed +00:00 offset because recall filters
+        expiry inside SQL using string comparison; mixed offsets would break it.
+        """
+        if value.tzinfo is not None:
+            value = value.astimezone(UTC)
+        return value.isoformat()
+
+    @staticmethod
     def _encode_cursor(record: MemoryRecord) -> str:
-        raw = f"{record.created_at.isoformat()}|{record.id}".encode()
+        raw = f"{SQLiteMemoryRepository._utc_isoformat(record.created_at)}|{record.id}".encode()
         return urlsafe_b64encode(raw).decode().rstrip("=")
 
     @staticmethod
