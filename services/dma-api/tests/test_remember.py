@@ -70,3 +70,15 @@ def test_remember_requires_valid_authentication(tmp_path) -> None:
         )
 
     assert response.status_code == 401
+
+
+def test_remember_rejects_a_wrong_api_key(tmp_path) -> None:
+    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key"))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/memories",
+            headers={"Authorization": "Bearer wrong-key", "Idempotency-Key": "remember-request-0001"},
+            json={"agent_id": "coding-agent", "content": "A fact", "type": "semantic"},
+        )
+
+    assert response.status_code == 401

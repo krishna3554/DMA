@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -42,7 +43,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def authenticate(authorization: str | None = Header(default=None)) -> str:
         expected = f"Bearer {runtime_settings.api_key}"
-        if authorization != expected:
+        if authorization is None or not secrets.compare_digest(authorization, expected):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid API key")
         return runtime_settings.tenant_id
 
