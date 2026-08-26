@@ -55,8 +55,10 @@ memory = DMAClient(
 ```
 
 For a public deployment, put the API behind HTTPS and restrict database-volume
-access to the host. SQLite is appropriate for a single self-hosted instance;
-PostgreSQL is the planned multi-process deployment backend.
+access to the host. Compose publishes the API on `127.0.0.1` only; expose it
+deliberately (for example via a TLS proxy) if remote access is required. SQLite
+is appropriate for a single self-hosted instance; PostgreSQL is the planned
+multi-process deployment backend.
 
 GitHub Actions runs this quality gate plus the offline benchmark baselines on
 every pull request and on pushes to `main`.
