@@ -89,10 +89,13 @@ hermes-agent
 
 ### Option 1: Python SDK
 
-Install the SDK into the environment used by the CLI tool or wrapper:
+Install the SDK into the environment used by the CLI tool or wrapper. The
+packages are not published to PyPI yet; until the first release, build and
+install them from a checkout:
 
 ```bash
-python -m pip install dma-sdk==0.1.0a0
+make build
+python -m pip install packages/dma-sdk-python/dist/dma_sdk-0.1.0a0-py3-none-any.whl
 ```
 
 Use the same API key and base URL as your self-hosted server:
@@ -137,10 +140,12 @@ gives better ergonomics.
 
 ### Option 3: MCP server
 
-For tools that support MCP servers, install `dma-mcp`:
+For tools that support MCP servers, install `dma-mcp`. Like the SDK, it is not
+on PyPI yet; build it from a checkout first:
 
 ```bash
-python -m pip install dma-mcp==0.1.0a0
+make build
+python -m pip install packages/dma-mcp/dist/dma_mcp-0.1.0a0-py3-none-any.whl
 ```
 
 Configure the tool to launch:
