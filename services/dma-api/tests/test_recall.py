@@ -59,3 +59,35 @@ def test_recall_excludes_expired_and_non_matching_types(tmp_path) -> None:
 
     assert response.status_code == 200
     assert [item["type"] for item in response.json()["results"]] == ["procedural"]
+
+
+def test_recall_falls_back_when_current_marker_filter_empties_results(tmp_path) -> None:
+    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key", tenant_id="tenant-a"))
+    with TestClient(app) as client:
+        _remember(client, "The database password is hunter2.", "semantic", "key-000000000005")
+        response = client.post(
+            "/v1/memories/recall",
+            headers={"Authorization": "Bearer test-key"},
+            json={"agent_id": "coding-agent", "query": "What is the latest database password?", "limit": 5},
+        )
+
+    assert response.status_code == 200
+    results = response.json()["results"]
+    assert len(results) == 1
+    assert results[0]["content"] == "The database password is hunter2."
+
+
+def test_recall_prefers_current_state_memories_for_now_queries(tmp_path) -> None:
+    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key", tenant_id="tenant-a"))
+    with TestClient(app) as client:
+        _remember(client, "User preferred Django for backend APIs.", "semantic", "key-000000000006")
+        _remember(client, "User now prefers Java Spring Boot for backend APIs.", "semantic", "key-000000000007")
+        response = client.post(
+            "/v1/memories/recall",
+            headers={"Authorization": "Bearer test-key"},
+            json={"agent_id": "coding-agent", "query": "What backend framework does the user prefer now?", "limit": 5},
+        )
+
+    assert response.status_code == 200
+    contents = [item["content"] for item in response.json()["results"]]
+    assert contents == ["User now prefers Java Spring Boot for backend APIs."]
