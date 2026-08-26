@@ -257,13 +257,17 @@ class SQLiteMemoryRepository:
             rows = connection.execute(statement, parameters).fetchall()
         query_tokens = self._important_tokens(query)
         records_with_relevance = []
-        for row in rows:
-            record = self._row_to_record(row)
-            if not self._passes_precision_filter(query, query_tokens, record.content):
-                continue
-            overlap = self._overlap_score(query_tokens, record.content)
-            current_boost = 0.25 if self._asks_for_current(query) and self._has_current_marker(record.content) else 0
-            records_with_relevance.append((record, max(float(row["relevance"]), 0.0) + overlap + current_boost))
+        for enforce_current_filter in (True, False):
+            records_with_relevance = []
+            for row in rows:
+                record = self._row_to_record(row)
+                if not self._passes_precision_filter(query, query_tokens, record.content, enforce_current_filter=enforce_current_filter):
+                    continue
+                overlap = self._overlap_score(query_tokens, record.content)
+                current_boost = 0.25 if self._asks_for_current(query) and self._has_current_marker(record.content) else 0
+                records_with_relevance.append((record, max(float(row["relevance"]), 0.0) + overlap + current_boost))
+            if records_with_relevance:
+                break
         if not records_with_relevance:
             return []
         top_relevance = max(relevance for _, relevance in records_with_relevance)
@@ -373,8 +377,10 @@ class SQLiteMemoryRepository:
         return " OR ".join(terms)
 
     @classmethod
-    def _passes_precision_filter(cls, query: str, query_tokens: set[str], content: str) -> bool:
-        if cls._asks_for_current(query) and not cls._has_current_marker(content):
+    def _passes_precision_filter(
+        cls, query: str, query_tokens: set[str], content: str, *, enforce_current_filter: bool = True
+    ) -> bool:
+        if enforce_current_filter and cls._asks_for_current(query) and not cls._has_current_marker(content):
             return False
         if not query_tokens:
             return False
