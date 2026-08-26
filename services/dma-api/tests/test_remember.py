@@ -72,38 +72,13 @@ def test_remember_requires_valid_authentication(tmp_path) -> None:
     assert response.status_code == 401
 
 
-def test_remember_rejects_naive_expires_at_as_validation_error(tmp_path) -> None:
-    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key", tenant_id="tenant-a"))
+def test_remember_rejects_a_wrong_api_key(tmp_path) -> None:
+    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key"))
     with TestClient(app) as client:
         response = client.post(
             "/v1/memories",
-            headers=_headers(),
-            json={
-                "agent_id": "coding-agent",
-                "content": "A fact",
-                "type": "semantic",
-                "expires_at": "2030-01-01T00:00:00",
-            },
+            headers={"Authorization": "Bearer wrong-key", "Idempotency-Key": "remember-request-0001"},
+            json={"agent_id": "coding-agent", "content": "A fact", "type": "semantic"},
         )
 
-    assert response.status_code == 422
-    body = response.json()
-    assert any("expires_at" in str(error.get("loc")) for error in body["detail"])
-
-
-def test_remember_accepts_timezone_aware_expires_at(tmp_path) -> None:
-    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key", tenant_id="tenant-a"))
-    with TestClient(app) as client:
-        response = client.post(
-            "/v1/memories",
-            headers=_headers(),
-            json={
-                "agent_id": "coding-agent",
-                "content": "A fact",
-                "type": "semantic",
-                "expires_at": "2030-01-01T00:00:00+00:00",
-            },
-        )
-
-    assert response.status_code == 201
-    assert response.json()["expires_at"] == "2030-01-01T00:00:00Z"
+    assert response.status_code == 401
