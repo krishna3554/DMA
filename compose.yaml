@@ -3,7 +3,10 @@ services:
     build:
       context: .
     ports:
-      - "8000:8000"
+      # Loopback-only by default so agent memories are not exposed to the
+      # network. To reach the API from another machine, put a TLS proxy in
+      # front or change this to "8000:8000" deliberately.
+      - "127.0.0.1:8000:8000"
     environment:
       DMA_ENVIRONMENT: production
       DMA_API_KEY: ${DMA_API_KEY:?Set DMA_API_KEY before starting DMA}
