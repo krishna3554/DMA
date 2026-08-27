@@ -50,12 +50,22 @@ def run_memory_eval(dataset_path: Path = DEFAULT_DATASET, *, limit: int = 3) -> 
     return _summarise(results, dataset_path, limit)
 
 
+def load_failures(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+
 def write_failures(report: dict[str, Any], output_path: Path) -> None:
     failures = report["failures"]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as file:
         for failure in failures:
             file.write(json.dumps(failure, sort_keys=True) + "\n")
+
+
+def _failures_to_set(failures: list[dict[str, Any]]) -> set[str]:
+    return {json.dumps(failure, sort_keys=True) for failure in failures}
 
 
 def _run_case(case: dict[str, Any], database_path: Path, *, limit: int) -> MemoryEvalResult:
@@ -233,6 +243,8 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--failures-output", type=Path)
+    parser.add_argument("--baseline", type=Path, help="Baseline failures file to compare against")
+    parser.add_argument("--fail", action="store_true", help="Exit with code 1 if failures differ from baseline")
     arguments = parser.parse_args()
     report = run_memory_eval(arguments.dataset, limit=arguments.limit)
     output = json.dumps(report, indent=2, sort_keys=True)
@@ -241,6 +253,17 @@ def main() -> None:
         arguments.output.write_text(output + "\n", encoding="utf-8")
     if arguments.failures_output:
         write_failures(report, arguments.failures_output)
+    if arguments.baseline:
+        current_failures = _failures_to_set(report["failures"])
+        baseline_failures = load_failures(arguments.baseline)
+        if current_failures != baseline_failures:
+            print("Benchmark failures differ from baseline!")
+            print(f"New failures: {current_failures - baseline_failures}")
+            print(f"Fixed failures: {baseline_failures - current_failures}")
+            if arguments.fail:
+                exit(1)
+        else:
+            print("Benchmark failures match baseline")
     print(output)
 
 

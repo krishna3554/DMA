@@ -2,6 +2,10 @@ services:
   dma-api:
     build:
       context: .
+      cache_from:
+        - type=gha
+      cache_to:
+        - type=gha,mode=max
     ports:
       # Loopback-only by default so agent memories are not exposed to the
       # network. To reach the API from another machine, put a TLS proxy in
