@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
+import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Response, status
 
 from dma_api.config import Settings
 from dma_api.models import (
@@ -42,7 +43,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def authenticate(authorization: str | None = Header(default=None)) -> str:
         expected = f"Bearer {runtime_settings.api_key}"
-        if authorization != expected:
+        if authorization is None or not secrets.compare_digest(authorization, expected):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid API key")
         return runtime_settings.tenant_id
 
@@ -112,15 +113,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.delete("/v1/memories/{memory_id}", status_code=status.HTTP_204_NO_CONTENT)
-    def forget(memory_id: str, agent_id: str, tenant_id: str = Depends(authenticate)) -> Response:
+    def forget(
+        memory_id: str = Path(pattern=r"^mem_[A-Za-z0-9]+$"),
+        agent_id: str = Query(min_length=1, max_length=128),
+        tenant_id: str = Depends(authenticate),
+    ) -> Response:
         if not repository.delete(tenant_id=tenant_id, agent_id=agent_id, memory_id=memory_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="memory not found")
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/v1/memories/{memory_id}/explanation", response_model=MemoryExplanation)
     def explain(
-        memory_id: str,
-        agent_id: str,
+        memory_id: str = Path(pattern=r"^mem_[A-Za-z0-9]+$"),
+        agent_id: str = Query(min_length=1, max_length=128),
         query: str | None = Query(default=None, max_length=20_000),
         tenant_id: str = Depends(authenticate),
     ) -> MemoryExplanation:

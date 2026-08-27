@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -26,6 +30,7 @@ jobs:
           -e 'services/dma-api[dev]'
           -e packages/dma-sdk-python
           -e packages/dma-langgraph
+          -e packages/dma-mcp
       - name: Test, lint, and type-check
         run: make check
       - name: Build distributable packages
@@ -36,11 +41,13 @@ jobs:
         run: |
           make benchmark
           make classify-benchmark
+          make benchmark-gated
       - name: Verify self-hosted Docker deployment
         env:
           DMA_API_KEY: ci-container-validation-key
         run: |
-          docker compose up --build -d
+          docker compose build --builder cloud
+          docker compose up -d
           for attempt in {1..15}; do
             if curl --fail --silent http://127.0.0.1:8000/healthz; then break; fi
             sleep 1

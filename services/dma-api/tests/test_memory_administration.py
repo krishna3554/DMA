@@ -70,3 +70,23 @@ def test_explain_and_forget_are_scoped_to_the_agent(tmp_path) -> None:
     }
     assert deletion.status_code == 204
     assert after_deletion.status_code == 404
+
+
+def test_forget_and_explain_reject_contract_violating_parameters(tmp_path) -> None:
+    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key", tenant_id="tenant-a"))
+    with TestClient(app) as client:
+        blank_agent_delete = client.delete(
+            "/v1/memories/mem_abc123?agent_id=", headers={"Authorization": "Bearer test-key"}
+        )
+        oversized_agent_explain = client.get(
+            f"/v1/memories/mem_abc123/explanation?agent_id={'x' * 129}",
+            headers={"Authorization": "Bearer test-key"},
+        )
+        malformed_memory_id = client.delete(
+            "/v1/memories/not-a-memory-id?agent_id=coding-agent",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert blank_agent_delete.status_code == 422
+    assert oversized_agent_explain.status_code == 422
+    assert malformed_memory_id.status_code == 422
