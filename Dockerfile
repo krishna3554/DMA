@@ -6,10 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY services/dma-api/pyproject.toml ./pyproject.toml
+COPY services/dma-api/pyproject.toml services/dma-api/uv.lock ./
 COPY services/dma-api/src ./src
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir uv && uv pip install --locked --no-cache .
 
 RUN useradd --create-home --uid 10001 dma \
     && mkdir /data \
