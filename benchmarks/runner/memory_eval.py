@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
@@ -261,7 +262,7 @@ def main() -> None:
             print(f"New failures: {current_failures - baseline_failures}")
             print(f"Fixed failures: {baseline_failures - current_failures}")
             if arguments.fail:
-                exit(1)
+                sys.exit(1)
         else:
             print("Benchmark failures match baseline")
     print(output)
