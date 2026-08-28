@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:be1575ed968de893bd54f4c56315ff7c4736ce522c1bca08fd521731aafc0d76
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -6,10 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY services/dma-api/pyproject.toml ./pyproject.toml
+COPY services/dma-api/pyproject.toml services/dma-api/uv.lock ./
 COPY services/dma-api/src ./src
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir uv && uv pip install --locked --no-cache .
 
 RUN useradd --create-home --uid 10001 dma \
     && mkdir /data \

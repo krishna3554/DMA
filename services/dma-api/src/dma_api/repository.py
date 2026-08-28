@@ -6,11 +6,15 @@ import json
 import re
 import sqlite3
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dma_api.models import MemoryType
+
+_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
 
 _CURRENT_MARKERS = {"now", "current", "currently", "latest", "newer", "active"}
 _STOPWORDS = {
@@ -99,7 +103,8 @@ class SQLiteMemoryRepository:
 
     def initialize(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        with self._transaction() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS memories (
@@ -250,7 +255,7 @@ class SQLiteMemoryRepository:
             "m.agent_id = ?",
             "(m.expires_at IS NULL OR m.expires_at > ?)",
         ]
-        parameters: list[object] = [search_query, tenant_id, agent_id, now.isoformat()]
+        parameters: list[object] = [search_query, tenant_id, agent_id, self._utc_isoformat(now)]
         if types:
             placeholders = ", ".join("?" for _ in types)
             where.append(f"m.type IN ({placeholders})")
@@ -265,17 +270,21 @@ class SQLiteMemoryRepository:
             ORDER BY relevance DESC, m.created_at DESC
             LIMIT ?
         """
-        with self._connect() as connection:
+        with self._transaction() as connection:
             rows = connection.execute(statement, parameters).fetchall()
         query_tokens = self._important_tokens(query)
         records_with_relevance = []
-        for row in rows:
-            record = self._row_to_record(row)
-            if not self._passes_precision_filter(query, query_tokens, record.content):
-                continue
-            overlap = self._overlap_score(query_tokens, record.content)
-            current_boost = 0.25 if self._asks_for_current(query) and self._has_current_marker(record.content) else 0
-            records_with_relevance.append((record, max(float(row["relevance"]), 0.0) + overlap + current_boost))
+        for enforce_current_filter in (True, False):
+            records_with_relevance = []
+            for row in rows:
+                record = self._row_to_record(row)
+                if not self._passes_precision_filter(query, query_tokens, record.content, enforce_current_filter=enforce_current_filter):
+                    continue
+                overlap = self._overlap_score(query_tokens, record.content)
+                current_boost = 0.25 if self._asks_for_current(query) and self._has_current_marker(record.content) else 0
+                records_with_relevance.append((record, max(float(row["relevance"]), 0.0) + overlap + current_boost))
+            if records_with_relevance:
+                break
         if not records_with_relevance:
             return []
         top_relevance = max(relevance for _, relevance in records_with_relevance)
@@ -309,7 +318,7 @@ class SQLiteMemoryRepository:
             ORDER BY created_at DESC, id DESC
             LIMIT ?
         """
-        with self._connect() as connection:
+        with self._transaction() as connection:
             rows = connection.execute(statement, parameters).fetchall()
         records = [self._row_to_record(row) for row in rows]
         has_next_page = len(records) > limit
@@ -318,7 +327,7 @@ class SQLiteMemoryRepository:
         return page, next_cursor
 
     def get(self, *, tenant_id: str, agent_id: str, memory_id: str) -> MemoryRecord | None:
-        with self._connect() as connection:
+        with self._transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM memories WHERE id = ? AND tenant_id = ? AND agent_id = ?",
                 (memory_id, tenant_id, agent_id),
@@ -327,7 +336,7 @@ class SQLiteMemoryRepository:
 
     def delete(self, *, tenant_id: str, agent_id: str, memory_id: str) -> bool:
         """Hard-delete a memory and all index/idempotency references to it."""
-        with self._connect() as connection:
+        with self._transaction() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT 1 FROM memories WHERE id = ? AND tenant_id = ? AND agent_id = ?",
@@ -341,10 +350,22 @@ class SQLiteMemoryRepository:
             return True
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._database_path)
+        """Open a configured connection; prefer :meth:`_transaction` for cleanup."""
+        connection = sqlite3.connect(self._database_path, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(f"PRAGMA busy_timeout = {int(_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}")
         return connection
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection whose work commits on success and is always closed."""
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     @staticmethod
     def _get_by_id(connection: sqlite3.Connection, memory_id: str) -> MemoryRecord:
@@ -385,8 +406,10 @@ class SQLiteMemoryRepository:
         return " OR ".join(terms)
 
     @classmethod
-    def _passes_precision_filter(cls, query: str, query_tokens: set[str], content: str) -> bool:
-        if cls._asks_for_current(query) and not cls._has_current_marker(content):
+    def _passes_precision_filter(
+        cls, query: str, query_tokens: set[str], content: str, *, enforce_current_filter: bool = True
+    ) -> bool:
+        if enforce_current_filter and cls._asks_for_current(query) and not cls._has_current_marker(content):
             return False
         if not query_tokens:
             return False
@@ -471,8 +494,19 @@ class SQLiteMemoryRepository:
         return " ".join(content.split()).casefold()
 
     @staticmethod
+    def _utc_isoformat(value: datetime) -> str:
+        """Serialise a datetime so lexical comparison matches chronological order.
+
+        Timestamps are stored with a fixed +00:00 offset because recall filters
+        expiry inside SQL using string comparison; mixed offsets would break it.
+        """
+        if value.tzinfo is not None:
+            value = value.astimezone(UTC)
+        return value.isoformat()
+
+    @staticmethod
     def _encode_cursor(record: MemoryRecord) -> str:
-        raw = f"{record.created_at.isoformat()}|{record.id}".encode()
+        raw = f"{SQLiteMemoryRepository._utc_isoformat(record.created_at)}|{record.id}".encode()
         return urlsafe_b64encode(raw).decode().rstrip("=")
 
     @staticmethod
