@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from abc import ABC, abstractmethod
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 from dma_api.models import MemoryType
@@ -49,6 +51,10 @@ _STOPWORDS = {
     "why",
     "with",
 }
+
+# Default query expansions (opt-in domain pack for DMA-specific corpus).
+# These are intentionally NOT used by the default "plain" analyzer to avoid
+# benchmark overfitting. Enable via AnalyzerKind.DOMAIN or config.
 _QUERY_EXPANSIONS = {
     "adapter": {"adapter", "langgraph", "mcp"},
     "api": {"api", "apis", "openapi", "rest"},
@@ -81,6 +87,89 @@ _QUERY_EXPANSIONS = {
 }
 
 
+class AnalyzerKind(str, Enum):
+    """Analyzer variants for tokenization and query expansion.
+
+    - PLAIN: No query expansion, exact token matching with prefix fallback.
+             This is the default to avoid corpus overfitting.
+    - DOMAIN: Opt-in domain pack with DMA-specific query expansions.
+    """
+
+    PLAIN = "plain"
+    DOMAIN = "domain"
+
+
+class Analyzer(ABC):
+    """Pluggable analyzer for tokenization and query expansion.
+
+    Implementations control how queries and content are tokenized and whether
+    query expansion is applied. The default PLAIN analyzer performs no
+    query expansion and uses prefix-only token matching to prevent false
+    positives from bidirectional substring matching.
+    """
+
+    @abstractmethod
+    def expand_tokens(self, tokens: set[str]) -> set[str]:
+        """Expand a set of tokens (e.g., with synonyms). Default: no-op."""
+
+    @abstractmethod
+    def tokens_match(self, query_token: str, content_token: str) -> bool:
+        """Determine if a query token matches a content token.
+
+        Default implementation uses prefix matching only to avoid
+        false positives from bidirectional substring matching (e.g., "cat"
+        matching "category", "api" matching "rapid").
+        """
+
+
+class PlainAnalyzer(Analyzer):
+    """Default analyzer: no query expansion, prefix-only token matching."""
+
+    def expand_tokens(self, tokens: set[str]) -> set[str]:
+        return tokens
+
+    def tokens_match(self, query_token: str, content_token: str) -> bool:
+        # Prefix-only matching: query token must be a prefix of content token
+        # when lengths differ. This prevents false positives like "cat" ⊂
+        # "category", "api" ⊂ "rapid", "art" ⊂ "particle".
+        if query_token == content_token:
+            return True
+        if len(query_token) >= 3 and content_token.startswith(query_token):
+            return True
+        return False
+
+
+class DomainAnalyzer(Analyzer):
+    """Opt-in domain analyzer with DMA-specific query expansions.
+
+    Uses the _QUERY_EXPANSIONS mapping for query expansion. Still uses
+    prefix-only token matching to prevent false positives.
+    """
+
+    def expand_tokens(self, tokens: set[str]) -> set[str]:
+        expanded = set(tokens)
+        for token in tokens:
+            expanded.update(_QUERY_EXPANSIONS.get(token, set()))
+        return expanded
+
+    def tokens_match(self, query_token: str, content_token: str) -> bool:
+        # Same prefix-only matching as PlainAnalyzer
+        if query_token == content_token:
+            return True
+        if len(query_token) >= 3 and content_token.startswith(query_token):
+            return True
+        return False
+
+
+def get_analyzer(kind: AnalyzerKind) -> Analyzer:
+    """Factory function to get an analyzer by kind."""
+    if kind == AnalyzerKind.PLAIN:
+        return PlainAnalyzer()
+    if kind == AnalyzerKind.DOMAIN:
+        return DomainAnalyzer()
+    raise ValueError(f"Unknown analyzer kind: {kind}")
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryRecord:
     id: str
@@ -98,8 +187,9 @@ class MemoryRecord:
 class SQLiteMemoryRepository:
     """A small persistence boundary that can later be replaced by PostgreSQL."""
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, analyzer: Analyzer | None = None) -> None:
         self._database_path = database_path
+        self._analyzer = analyzer or PlainAnalyzer()
 
     def initialize(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -385,7 +475,8 @@ class SQLiteMemoryRepository:
         a harmless wording variation (for example, ``prefer`` vs ``prefers``) from
         producing an empty result set before semantic retrieval is introduced.
         """
-        tokens = SQLiteMemoryRepository._expanded_tokens(query)
+        # This is a static method - can't use instance analyzer. Uses plain tokens.
+        tokens = SQLiteMemoryRepository._expanded_tokens_static(query)
         terms = []
         for token in tokens:
             terms.append(f'"{token}"')
@@ -393,56 +484,53 @@ class SQLiteMemoryRepository:
                 terms.append(f"{token}*")
         return " OR ".join(terms)
 
-    @classmethod
+    @staticmethod
+    def _expanded_tokens_static(text: str) -> set[str]:
+        """Static version for FTS query building (uses plain tokens)."""
+        return {
+            token
+            for token in (SQLiteMemoryRepository._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
+            if token and len(token) > 2
+        }
+
     def _passes_precision_filter(
-        cls, query: str, query_tokens: set[str], content: str, *, enforce_current_filter: bool = True
+        self, query: str, query_tokens: set[str], content: str, *, enforce_current_filter: bool = True
     ) -> bool:
-        if enforce_current_filter and cls._asks_for_current(query) and not cls._has_current_marker(content):
+        if enforce_current_filter and self._asks_for_current(query) and not self._has_current_marker(content):
             return False
         if not query_tokens:
             return False
-        overlap = cls._matching_tokens(query_tokens, content)
+        overlap = self._matching_tokens(query_tokens, content)
         if len(query_tokens) == 1:
             return len(overlap) == 1
         return len(overlap) >= 2 or len(overlap) / len(query_tokens) >= 0.5
 
-    @classmethod
-    def _overlap_score(cls, query_tokens: set[str], content: str) -> float:
+    def _overlap_score(self, query_tokens: set[str], content: str) -> float:
         if not query_tokens:
             return 0.0
-        return len(cls._matching_tokens(query_tokens, content)) / len(query_tokens)
+        return len(self._matching_tokens(query_tokens, content)) / len(query_tokens)
 
-    @classmethod
-    def _matching_tokens(cls, query_tokens: set[str], content: str) -> set[str]:
-        content_tokens = cls._content_tokens(content)
+    def _matching_tokens(self, query_tokens: set[str], content: str) -> set[str]:
+        content_tokens = self._content_tokens(content)
         return {
             query_token
             for query_token in query_tokens
-            if any(cls._tokens_match(query_token, content_token) for content_token in content_tokens)
+            if any(self._analyzer.tokens_match(query_token, content_token) for content_token in content_tokens)
         }
 
-    @classmethod
-    def _important_tokens(cls, text: str) -> set[str]:
-        return cls._expand_tokens({
+    def _important_tokens(self, text: str) -> set[str]:
+        return self._analyzer.expand_tokens({
             token
-            for token in (cls._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
+            for token in (self._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
             if token and token not in _STOPWORDS and len(token) > 2
         })
 
-    @classmethod
-    def _expanded_tokens(cls, text: str) -> set[str]:
-        return cls._expand_tokens({
+    def _expanded_tokens(self, text: str) -> set[str]:
+        return self._analyzer.expand_tokens({
             token
-            for token in (cls._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
+            for token in (self._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
             if token and len(token) > 2
         })
-
-    @staticmethod
-    def _expand_tokens(tokens: set[str]) -> set[str]:
-        expanded = set(tokens)
-        for token in tokens:
-            expanded.update(_QUERY_EXPANSIONS.get(token, set()))
-        return expanded
 
     @classmethod
     def _content_tokens(cls, text: str) -> set[str]:
@@ -460,14 +548,6 @@ class SQLiteMemoryRepository:
         if len(token) > 4 and token.endswith("s"):
             return token[:-1]
         return token
-
-    @staticmethod
-    def _tokens_match(query_token: str, content_token: str) -> bool:
-        return (
-            query_token == content_token
-            or (len(query_token) >= 3 and query_token in content_token)
-            or (len(content_token) >= 3 and content_token in query_token)
-        )
 
     @classmethod
     def _asks_for_current(cls, query: str) -> bool:
