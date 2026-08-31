@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import secrets
+import threading
+import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Response, status
 
-from dma_api.config import Settings
+from dma_api.config import AuthLimits, Settings
 from dma_api.models import (
     MemoryExplanation,
     MemoryPage,
@@ -24,12 +28,64 @@ from dma_api.models import (
 )
 from dma_api.repository import MemoryRecord, SQLiteMemoryRepository, get_analyzer
 
+logger = logging.getLogger("dma_api.auth")
+
+
+@dataclass
+class _SourceRecord:
+    timestamps: list[float] = field(default_factory=list)
+    locked_until: float = 0.0
+
+
+class InMemoryRateLimiter:
+    """Per-source sliding-window rate limiter with lockout for failed auth."""
+
+    def __init__(self, limits: AuthLimits) -> None:
+        self._max_attempts = limits.max_attempts
+        self._window = limits.window_seconds
+        self._lockout = limits.lockout_seconds
+        self._sources: dict[str, _SourceRecord] = {}
+        self._lock = threading.Lock()
+
+    def is_locked_out(self, source: str) -> bool:
+        with self._lock:
+            record = self._sources.get(source)
+            if record is None:
+                return False
+            return record.locked_until > time.monotonic()
+
+    def record_failure(self, source: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            record = self._sources.setdefault(source, _SourceRecord())
+            cutoff = now - self._window
+            record.timestamps = [t for t in record.timestamps if t > cutoff]
+            record.timestamps.append(now)
+            if len(record.timestamps) >= self._max_attempts:
+                record.locked_until = now + self._lockout
+        logger.warning(
+            "auth_failure source=%s total_in_window=%d",
+            source,
+            len(record.timestamps),
+        )
+
+    def record_success(self, source: str) -> None:
+        with self._lock:
+            self._sources.pop(source, None)
+
+
+def _client_source(x_forwarded_for: str | None) -> str:
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+    return "unknown"
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create an independently configurable API application."""
     runtime_settings = settings or Settings()
     analyzer = get_analyzer(runtime_settings.analyzer_kind)
     repository = SQLiteMemoryRepository(runtime_settings.database_path, analyzer=analyzer)
+    rate_limiter = InMemoryRateLimiter(runtime_settings.auth_limits)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -42,10 +98,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    def authenticate(authorization: str | None = Header(default=None)) -> str:
+    def authenticate(
+        authorization: str | None = Header(default=None),
+        x_forwarded_for: str | None = Header(default=None, alias="X-Forwarded-For"),
+    ) -> str:
+        source = _client_source(x_forwarded_for)
+        if rate_limiter.is_locked_out(source):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too many failed authentication attempts; try again later",
+            )
         expected = f"Bearer {runtime_settings.api_key}"
         if authorization is None or not secrets.compare_digest(authorization, expected):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid API key")
+            rate_limiter.record_failure(source)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid API key"
+            )
+        rate_limiter.record_success(source)
         return runtime_settings.tenant_id
 
     @app.post("/v1/memories", response_model=MemoryResponse, status_code=status.HTTP_201_CREATED)
