@@ -15,7 +15,12 @@ from time import perf_counter_ns
 from typing import Any
 
 from dma_api.models import MemoryType
-from dma_api.repository import MemoryRecord, SQLiteMemoryRepository, AnalyzerKind, get_analyzer
+from dma_api.repository import (
+    AnalyzerKind,
+    MemoryRecord,
+    SQLiteMemoryRepository,
+    get_analyzer,
+)
 
 DEFAULT_DATASET = Path("benchmarks/datasets/memory-eval-v0.1.jsonl")
 DEFAULT_NOW = datetime.fromisoformat("2026-08-01T00:00:00+00:00")

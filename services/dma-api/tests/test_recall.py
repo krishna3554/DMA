@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from dma_api.config import Settings
 from dma_api.main import create_app
 from dma_api.models import MemoryType
-from dma_api.repository import MemoryRecord, SQLiteMemoryRepository
+from dma_api.repository import AnalyzerKind, MemoryRecord, SQLiteMemoryRepository
 
 
 def _headers(key: str) -> dict[str, str]:
@@ -95,9 +95,7 @@ def test_recall_includes_memories_expiring_after_now_regardless_of_offset(tmp_pa
         now=now,
     )
 
-    assert response.status_code == 200
-    contents = [item["content"] for item in response.json()["results"]]
-    assert contents == ["User now prefers Java Spring Boot for backend APIs."]
+    assert [record.id for record, _ in matches] == ["mem_offsetexpiry00000000000001"]
 
 
 def test_recall_prefix_only_matching_no_false_positives(tmp_path) -> None:
@@ -160,3 +158,58 @@ def test_recall_prefix_only_matching_no_false_positives(tmp_path) -> None:
     # Both should match since 'cat' is a prefix of 'category'
     assert "The cat sits on the mat." in contents
     assert "The category system organizes items." in contents
+
+
+def test_domain_analyzer_recalls_expansion_only_content(tmp_path) -> None:
+    """A domain synonym must reach candidate selection, not just scoring."""
+    app = create_app(
+        Settings(
+            database_path=tmp_path / "dma.db",
+            api_key="test-key",
+            tenant_id="tenant-a",
+            analyzer_kind=AnalyzerKind.DOMAIN,
+        )
+    )
+    with TestClient(app) as client:
+        _remember(client, "Django powers the reporting service.", "semantic", "key-000000000010")
+        response = client.post(
+            "/v1/memories/recall",
+            headers={"Authorization": "Bearer test-key"},
+            json={"agent_id": "coding-agent", "query": "framework", "limit": 5},
+        )
+
+    assert response.status_code == 200
+    contents = [item["content"] for item in response.json()["results"]]
+    assert "Django powers the reporting service." in contents
+
+
+def test_naive_expiry_is_treated_as_utc(tmp_path) -> None:
+    repository = SQLiteMemoryRepository(tmp_path / "dma.db")
+    repository.initialize()
+    now = datetime(2026, 8, 27, 20, 0, 0, tzinfo=UTC)
+    repository.create_or_get(
+        MemoryRecord(
+            id="mem_naiveexpiry000000000000001",
+            tenant_id="tenant-a",
+            agent_id="coding-agent",
+            content="Staging cluster deployment notes.",
+            type=MemoryType.EPISODIC,
+            version=1,
+            created_at=now,
+            updated_at=now,
+            expires_at=datetime(2026, 8, 27, 21, 0, 0),  # noqa: DTZ001 - naive on purpose
+            metadata={},
+        ),
+        "idempotency-naive-expiry-0001",
+    )
+
+    matches = repository.recall(
+        tenant_id="tenant-a",
+        agent_id="coding-agent",
+        query="staging cluster deployment",
+        types=None,
+        limit=5,
+        now=now,
+    )
+
+    assert [record.id for record, _ in matches] == ["mem_naiveexpiry000000000000001"]

@@ -134,9 +134,7 @@ class PlainAnalyzer(Analyzer):
         # "category", "api" ⊂ "rapid", "art" ⊂ "particle".
         if query_token == content_token:
             return True
-        if len(query_token) >= 3 and content_token.startswith(query_token):
-            return True
-        return False
+        return len(query_token) >= 3 and content_token.startswith(query_token)
 
 
 class DomainAnalyzer(Analyzer):
@@ -156,9 +154,7 @@ class DomainAnalyzer(Analyzer):
         # Same prefix-only matching as PlainAnalyzer
         if query_token == content_token:
             return True
-        if len(query_token) >= 3 and content_token.startswith(query_token):
-            return True
-        return False
+        return len(query_token) >= 3 and content_token.startswith(query_token)
 
 
 def get_analyzer(kind: AnalyzerKind) -> Analyzer:
@@ -467,16 +463,16 @@ class SQLiteMemoryRepository:
             metadata=json.loads(row["metadata_json"]),
         )
 
-    @staticmethod
-    def _to_fts_query(query: str) -> str:
+    def _to_fts_query(self, query: str) -> str:
         """Convert arbitrary user text to a safe OR query for SQLite FTS5.
 
         BM25 ranks records matching more query terms above partial matches. OR prevents
         a harmless wording variation (for example, ``prefer`` vs ``prefers``) from
-        producing an empty result set before semantic retrieval is introduced.
+        producing an empty result set before semantic retrieval is introduced. Tokens
+        come from the configured analyzer so that its expansions reach candidate
+        selection rather than only the precision filter.
         """
-        # This is a static method - can't use instance analyzer. Uses plain tokens.
-        tokens = SQLiteMemoryRepository._expanded_tokens_static(query)
+        tokens = self._expanded_tokens(query)
         terms = []
         for token in tokens:
             terms.append(f'"{token}"')
@@ -486,15 +482,6 @@ class SQLiteMemoryRepository:
             if len(token) >= 3:
                 terms.append(f"{token}*")
         return " OR ".join(terms)
-
-    @staticmethod
-    def _expanded_tokens_static(text: str) -> set[str]:
-        """Static version for FTS query building (uses plain tokens)."""
-        return {
-            token
-            for token in (SQLiteMemoryRepository._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
-            if token and len(token) > 2
-        }
 
     def _passes_precision_filter(
         self, query: str, query_tokens: set[str], content: str, *, enforce_current_filter: bool = True
@@ -514,11 +501,21 @@ class SQLiteMemoryRepository:
         return len(self._matching_tokens(query_tokens, content)) / len(query_tokens)
 
     def _matching_tokens(self, query_tokens: set[str], content: str) -> set[str]:
+        """Return the query tokens the content satisfies, directly or by expansion.
+
+        An expansion match is credited to the query token it came from, so a
+        synonym-only record still counts as one match out of the query's own
+        tokens instead of diluting the overlap ratio.
+        """
         content_tokens = self._content_tokens(content)
         return {
             query_token
             for query_token in query_tokens
-            if any(self._analyzer.tokens_match(query_token, content_token) for content_token in content_tokens)
+            if any(
+                self._analyzer.tokens_match(candidate, content_token)
+                for candidate in self._analyzer.expand_tokens({query_token})
+                for content_token in content_tokens
+            )
         }
 
     def _important_tokens(self, text: str) -> set[str]:
@@ -569,9 +566,9 @@ class SQLiteMemoryRepository:
         Timestamps are stored with a fixed +00:00 offset because recall filters
         expiry inside SQL using string comparison; mixed offsets would break it.
         """
-        if value.tzinfo is not None:
-            value = value.astimezone(UTC)
-        return value.isoformat()
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC).isoformat()
+        return value.astimezone(UTC).isoformat()
 
     @staticmethod
     def _encode_cursor(record: MemoryRecord) -> str:

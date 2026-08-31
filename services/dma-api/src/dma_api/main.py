@@ -12,7 +12,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Response, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+    status,
+)
 
 from dma_api.config import AuthLimits, Settings
 from dma_api.models import (
@@ -44,6 +54,7 @@ class InMemoryRateLimiter:
         self._max_attempts = limits.max_attempts
         self._window = limits.window_seconds
         self._lockout = limits.lockout_seconds
+        self._max_sources = limits.max_tracked_sources
         self._sources: dict[str, _SourceRecord] = {}
         self._lock = threading.Lock()
 
@@ -57,27 +68,69 @@ class InMemoryRateLimiter:
     def record_failure(self, source: str) -> None:
         now = time.monotonic()
         with self._lock:
+            self._evict_stale(now)
             record = self._sources.setdefault(source, _SourceRecord())
             cutoff = now - self._window
             record.timestamps = [t for t in record.timestamps if t > cutoff]
             record.timestamps.append(now)
             if len(record.timestamps) >= self._max_attempts:
                 record.locked_until = now + self._lockout
+            attempts_in_window = len(record.timestamps)
         logger.warning(
             "auth_failure source=%s total_in_window=%d",
             source,
-            len(record.timestamps),
+            attempts_in_window,
         )
 
     def record_success(self, source: str) -> None:
         with self._lock:
             self._sources.pop(source, None)
 
+    def tracked_sources(self) -> int:
+        with self._lock:
+            return len(self._sources)
 
-def _client_source(x_forwarded_for: str | None) -> str:
-    if x_forwarded_for:
-        return x_forwarded_for.split(",")[0].strip()
-    return "unknown"
+    def _evict_stale(self, now: float) -> None:
+        """Drop sources without in-window failures or an active lockout.
+
+        Must be called while holding ``self._lock``. When eviction alone cannot
+        keep the map under ``max_tracked_sources``, the least recently active
+        sources are dropped so source churn cannot grow memory without bound.
+        """
+        cutoff = now - self._window
+        for key, record in list(self._sources.items()):
+            if record.locked_until > now:
+                continue
+            if not any(timestamp > cutoff for timestamp in record.timestamps):
+                del self._sources[key]
+        overflow = len(self._sources) - self._max_sources + 1
+        if overflow <= 0:
+            return
+        stalest = sorted(self._sources, key=self._last_activity)[:overflow]
+        for key in stalest:
+            del self._sources[key]
+
+    def _last_activity(self, source: str) -> float:
+        record = self._sources[source]
+        return max(record.locked_until, max(record.timestamps, default=0.0))
+
+
+def _client_source(
+    request: Request, x_forwarded_for: str | None, *, trust_forwarded_for: bool
+) -> str:
+    """Identify the caller for rate limiting.
+
+    ``X-Forwarded-For`` is honoured only when the deployment declares that it
+    runs behind a trusted proxy; otherwise a client could rotate the header to
+    win a fresh failure counter for every guess. The transport peer address is
+    the default, so direct callers are never pooled into one shared bucket.
+    """
+    if trust_forwarded_for and x_forwarded_for:
+        forwarded = x_forwarded_for.split(",")[0].strip()
+        if forwarded:
+            return forwarded
+    client = request.client
+    return client.host if client is not None else "unknown"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -99,10 +152,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     def authenticate(
+        request: Request,
         authorization: str | None = Header(default=None),
         x_forwarded_for: str | None = Header(default=None, alias="X-Forwarded-For"),
     ) -> str:
-        source = _client_source(x_forwarded_for)
+        source = _client_source(
+            request, x_forwarded_for, trust_forwarded_for=runtime_settings.trust_forwarded_for
+        )
         if rate_limiter.is_locked_out(source):
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
