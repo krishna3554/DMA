@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import sys
 
 from dma import DMAClient
 
@@ -35,5 +37,9 @@ def main() -> None:
     api_key = os.environ.get("DMA_API_KEY")
     if not api_key:
         raise SystemExit("DMA_API_KEY must be set")
+    logging.basicConfig(stream=sys.stderr, level=os.getenv("DMA_MCP_LOG_LEVEL", "INFO"))
     client = DMAClient(api_key=api_key, agent_id=os.getenv("DMA_MCP_AGENT_ID", "mcp-agent"), base_url=os.getenv("DMA_BASE_URL", "http://127.0.0.1:8000"))
-    create_server(DMATools(client)).run(transport="stdio")
+    try:
+        create_server(DMATools(client)).run(transport="stdio")
+    finally:
+        client.close()

@@ -5,7 +5,14 @@ import json
 import httpx
 import pytest
 
-from dma import AuthenticationError, DMAApiError, DMAClient, MemoryType, ValidationError
+from dma import (
+    AuthenticationError,
+    DMAApiError,
+    DMAClient,
+    DMAConnectionError,
+    MemoryType,
+    ValidationError,
+)
 
 
 def _memory_payload() -> dict[str, object]:
@@ -88,6 +95,51 @@ def test_client_surfaces_auth_and_api_errors() -> None:
     api_client = _client(lambda _: httpx.Response(404, json={"detail": "memory not found"}))
     with pytest.raises(DMAApiError, match="memory not found"):
         api_client.forget("mem_missing")
+
+
+def test_retries_replay_safe_requests_with_the_same_idempotency_key() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["Idempotency-Key"])
+        if len(seen) == 1:
+            raise httpx.ConnectError("boom")
+        return httpx.Response(201, json=_memory_payload())
+
+    client = DMAClient(
+        api_key="test-key",
+        agent_id="coding-agent",
+        base_url="https://dma.test",
+        max_retries=1,
+        transport=httpx.MockTransport(handler),
+    )
+    memory = client.remember(content="User prefers Java Spring Boot.", type=MemoryType.SEMANTIC)
+    assert memory.id == "mem_abc123"
+    assert seen == [seen[0], seen[0]]
+
+
+def test_delete_is_not_retried_and_retries_are_bounded() -> None:
+    attempts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(request.method)
+        raise httpx.ConnectError("boom")
+
+    client = DMAClient(
+        api_key="test-key",
+        agent_id="coding-agent",
+        base_url="https://dma.test",
+        max_retries=2,
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(DMAConnectionError):
+        client.forget("mem_abc123")
+    assert attempts == ["DELETE"]
+
+    attempts.clear()
+    with pytest.raises(DMAConnectionError):
+        client.recall(query="Java")
+    assert attempts == ["POST", "POST", "POST"]
 
 
 def test_client_validates_inputs_before_requests() -> None:
