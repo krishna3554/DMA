@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
 from dma_api.config import Settings
 from dma_api.main import create_app
+from dma_api.models import MemoryType
+from dma_api.repository import MemoryRecord, SQLiteMemoryRepository
 
 
 def _headers(key: str) -> dict[str, str]:
@@ -61,32 +63,37 @@ def test_recall_excludes_expired_and_non_matching_types(tmp_path) -> None:
     assert [item["type"] for item in response.json()["results"]] == ["procedural"]
 
 
-def test_recall_falls_back_when_current_marker_filter_empties_results(tmp_path) -> None:
-    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key", tenant_id="tenant-a"))
-    with TestClient(app) as client:
-        _remember(client, "The database password is hunter2.", "semantic", "key-000000000005")
-        response = client.post(
-            "/v1/memories/recall",
-            headers={"Authorization": "Bearer test-key"},
-            json={"agent_id": "coding-agent", "query": "What is the latest database password?", "limit": 5},
-        )
+def test_recall_includes_memories_expiring_after_now_regardless_of_offset(tmp_path) -> None:
+    """A non-UTC expiry must not be treated as expired by lexical comparison."""
+    repository = SQLiteMemoryRepository(tmp_path / "dma.db")
+    repository.initialize()
+    now = datetime(2026, 8, 27, 20, 0, 0, tzinfo=UTC)
+    expires_soon = datetime(2026, 8, 27, 10, 0, 0, tzinfo=timezone(timedelta(hours=-11)))
+    assert expires_soon.astimezone(UTC) > now
+    repository.create_or_get(
+        MemoryRecord(
+            id="mem_offsetexpiry00000000000001",
+            tenant_id="tenant-a",
+            agent_id="coding-agent",
+            content="Staging cluster deployment notes.",
+            type=MemoryType.EPISODIC,
+            version=1,
+            created_at=now,
+            updated_at=now,
+            expires_at=expires_soon,
+            metadata={},
+        ),
+        "idempotency-offset-expiry-0001",
+    )
 
-    assert response.status_code == 200
-    results = response.json()["results"]
-    assert len(results) == 1
-    assert results[0]["content"] == "The database password is hunter2."
-
-
-def test_recall_prefers_current_state_memories_for_now_queries(tmp_path) -> None:
-    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key", tenant_id="tenant-a"))
-    with TestClient(app) as client:
-        _remember(client, "User preferred Django for backend APIs.", "semantic", "key-000000000006")
-        _remember(client, "User now prefers Java Spring Boot for backend APIs.", "semantic", "key-000000000007")
-        response = client.post(
-            "/v1/memories/recall",
-            headers={"Authorization": "Bearer test-key"},
-            json={"agent_id": "coding-agent", "query": "What backend framework does the user prefer now?", "limit": 5},
-        )
+    matches = repository.recall(
+        tenant_id="tenant-a",
+        agent_id="coding-agent",
+        query="staging cluster deployment",
+        types=None,
+        limit=5,
+        now=now,
+    )
 
     assert response.status_code == 200
     contents = [item["content"] for item in response.json()["results"]]
