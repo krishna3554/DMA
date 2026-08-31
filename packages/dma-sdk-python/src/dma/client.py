@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+import time
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Self
@@ -20,6 +22,8 @@ from dma.models import (
 )
 
 _DEFAULT_BASE_URL = "https://api.dma.dev"
+_DEFAULT_MAX_RETRIES = 2
+_RETRY_BACKOFF_SECONDS = 0.2
 
 
 class DMAClient:
@@ -27,6 +31,10 @@ class DMAClient:
 
     The caller owns the client lifecycle. Use it as a context manager in scripts
     and services to ensure its HTTP connection pool is closed.
+
+    Transport failures are retried up to ``max_retries`` times for requests that
+    are safe to replay: reads, and writes carrying an ``Idempotency-Key``.
+    Deletes are never retried.
     """
 
     def __init__(
@@ -36,6 +44,7 @@ class DMAClient:
         agent_id: str,
         base_url: str = _DEFAULT_BASE_URL,
         timeout: float = 5.0,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         if not api_key.strip():
@@ -44,7 +53,10 @@ class DMAClient:
             raise ValidationError("agent_id must not be blank")
         if timeout <= 0:
             raise ValidationError("timeout must be greater than zero")
+        if max_retries < 0:
+            raise ValidationError("max_retries must not be negative")
         self._agent_id = agent_id
+        self._max_retries = max_retries
         self._client = httpx.Client(
             base_url=base_url.rstrip("/") + "/",
             timeout=timeout,
@@ -75,7 +87,9 @@ class DMAClient:
         }
         if expires_at is not None:
             payload["expires_at"] = expires_at.isoformat()
-        response = self._request("POST", "v1/memories", json=payload, headers={"Idempotency-Key": key})
+        response = self._request(
+            "POST", "v1/memories", json=payload, headers={"Idempotency-Key": key}, retryable=True
+        )
         return _memory_from_payload(response.json())
 
     def recall(
@@ -92,7 +106,7 @@ class DMAClient:
         payload: dict[str, Any] = {"agent_id": self._agent_id, "query": query, "limit": limit}
         if types is not None:
             payload["types"] = [self._memory_type(memory_type).value for memory_type in types]
-        response = self._request("POST", "v1/memories/recall", json=payload)
+        response = self._request("POST", "v1/memories/recall", json=payload, retryable=True)
         return [_recall_result_from_payload(item) for item in response.json()["results"]]
 
     def list(
@@ -110,7 +124,7 @@ class DMAClient:
             params["type"] = self._memory_type(type).value
         if cursor is not None:
             params["cursor"] = cursor
-        response = self._request("GET", "v1/memories", params=params)
+        response = self._request("GET", "v1/memories", params=params, retryable=True)
         payload = response.json()
         return MemoryPage(
             items=[_memory_from_payload(item) for item in payload["items"]],
@@ -130,7 +144,9 @@ class DMAClient:
         params: dict[str, Any] = {"agent_id": self._agent_id}
         if query is not None:
             params["query"] = query
-        response = self._request("GET", f"v1/memories/{memory_id}/explanation", params=params)
+        response = self._request(
+            "GET", f"v1/memories/{memory_id}/explanation", params=params, retryable=True
+        )
         payload = response.json()
         retrieval = payload["retrieval"]
         return MemoryExplanation(
@@ -155,17 +171,24 @@ class DMAClient:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        try:
-            response = self._client.request(method, path, **kwargs)
-        except httpx.HTTPError as error:
-            raise DMAConnectionError("unable to reach the DMA API") from error
+    def _request(self, method: str, path: str, *, retryable: bool = False, **kwargs: Any) -> httpx.Response:
+        response = self._send(method, path, self._max_retries if retryable else 0, kwargs)
         if response.status_code == 401:
             raise AuthenticationError(401, "DMA API key was rejected")
         if response.is_error:
             message, code = _error_details(response)
             raise DMAApiError(response.status_code, message, code=code)
         return response
+
+    def _send(self, method: str, path: str, retries: int, kwargs: dict[str, Any]) -> httpx.Response:
+        for attempt in range(retries + 1):
+            try:
+                return self._client.request(method, path, **kwargs)
+            except httpx.HTTPError as error:
+                if attempt == retries:
+                    raise DMAConnectionError("unable to reach the DMA API") from error
+                time.sleep(_RETRY_BACKOFF_SECONDS * 2**attempt * (0.5 + random.random()))
+        raise DMAConnectionError("unable to reach the DMA API")
 
     @staticmethod
     def _validate_non_blank(value: str, field: str) -> None:
