@@ -9,7 +9,10 @@ WORKDIR /app
 COPY services/dma-api/pyproject.toml services/dma-api/uv.lock ./
 COPY services/dma-api/src ./src
 
-RUN pip install --no-cache-dir uv && uv pip install --locked --no-cache .
+RUN pip install --no-cache-dir uv \
+    && uv export --frozen --no-dev --no-emit-project --output-file requirements.txt \
+    && uv pip install --system --no-cache -r requirements.txt . \
+    && rm requirements.txt
 
 RUN useradd --create-home --uid 10001 dma \
     && mkdir /data \
