@@ -10,7 +10,7 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -480,7 +480,10 @@ class SQLiteMemoryRepository:
         terms = []
         for token in tokens:
             terms.append(f'"{token}"')
-            if len(token) > 3:
+            # Use prefix matching for tokens >= 3 chars to align with analyzer's
+            # prefix-only matching (avoids false positives from bidirectional
+            # substring matching like "cat" in "category").
+            if len(token) >= 3:
                 terms.append(f"{token}*")
         return " OR ".join(terms)
 
@@ -549,13 +552,11 @@ class SQLiteMemoryRepository:
             return token[:-1]
         return token
 
-    @classmethod
-    def _asks_for_current(cls, query: str) -> bool:
-        return bool(cls._important_tokens(query).intersection(_CURRENT_MARKERS) or {"now", "current", "latest"}.intersection(cls._content_tokens(query)))
+    def _asks_for_current(self, query: str) -> bool:
+        return bool(self._important_tokens(query).intersection(_CURRENT_MARKERS) or {"now", "current", "latest"}.intersection(self._content_tokens(query)))
 
-    @classmethod
-    def _has_current_marker(cls, content: str) -> bool:
-        return bool(cls._content_tokens(content).intersection(_CURRENT_MARKERS))
+    def _has_current_marker(self, content: str) -> bool:
+        return bool(self._content_tokens(content).intersection(_CURRENT_MARKERS))
 
     @staticmethod
     def _normalise_semantic(content: str) -> str:

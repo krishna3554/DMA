@@ -22,13 +22,14 @@ from dma_api.models import (
     RememberRequest,
     RetrievalExplanation,
 )
-from dma_api.repository import MemoryRecord, SQLiteMemoryRepository
+from dma_api.repository import MemoryRecord, SQLiteMemoryRepository, get_analyzer
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create an independently configurable API application."""
     runtime_settings = settings or Settings()
-    repository = SQLiteMemoryRepository(runtime_settings.database_path)
+    analyzer = get_analyzer(runtime_settings.analyzer_kind)
+    repository = SQLiteMemoryRepository(runtime_settings.database_path, analyzer=analyzer)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
