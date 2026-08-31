@@ -15,11 +15,21 @@ from time import perf_counter_ns
 from typing import Any
 
 from dma_api.models import MemoryType
-from dma_api.repository import MemoryRecord, SQLiteMemoryRepository
+from dma_api.repository import (
+    AnalyzerKind,
+    MemoryRecord,
+    SQLiteMemoryRepository,
+    get_analyzer,
+)
 
 DEFAULT_DATASET = Path("benchmarks/datasets/memory-eval-v0.1.jsonl")
 DEFAULT_NOW = datetime.fromisoformat("2026-08-01T00:00:00+00:00")
 TENANT_ID = "memory-eval-tenant"
+# Use DomainAnalyzer for benchmark parity with the evaluation corpus.
+# The DomainAnalyzer includes DMA-specific query expansions that the
+# eval dataset was designed for. The default PLAIN analyzer has no
+# expansions and uses prefix-only matching to avoid false positives.
+BENCHMARK_ANALYZER = get_analyzer(AnalyzerKind.DOMAIN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +80,7 @@ def _failures_to_set(failures: list[dict[str, Any]]) -> set[str]:
 
 
 def _run_case(case: dict[str, Any], database_path: Path, *, limit: int) -> MemoryEvalResult:
-    repository = SQLiteMemoryRepository(database_path)
+    repository = SQLiteMemoryRepository(database_path, analyzer=BENCHMARK_ANALYZER)
     repository.initialize()
     for index, memory in enumerate(case["memories"]):
         timestamp = DEFAULT_NOW.replace(microsecond=index)

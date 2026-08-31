@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from abc import ABC, abstractmethod
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 
 from dma_api.models import MemoryType
@@ -49,6 +51,10 @@ _STOPWORDS = {
     "why",
     "with",
 }
+
+# Default query expansions (opt-in domain pack for DMA-specific corpus).
+# These are intentionally NOT used by the default "plain" analyzer to avoid
+# benchmark overfitting. Enable via AnalyzerKind.DOMAIN or config.
 _QUERY_EXPANSIONS = {
     "adapter": {"adapter", "langgraph", "mcp"},
     "api": {"api", "apis", "openapi", "rest"},
@@ -81,6 +87,85 @@ _QUERY_EXPANSIONS = {
 }
 
 
+class AnalyzerKind(str, Enum):
+    """Analyzer variants for tokenization and query expansion.
+
+    - PLAIN: No query expansion, exact token matching with prefix fallback.
+             This is the default to avoid corpus overfitting.
+    - DOMAIN: Opt-in domain pack with DMA-specific query expansions.
+    """
+
+    PLAIN = "plain"
+    DOMAIN = "domain"
+
+
+class Analyzer(ABC):
+    """Pluggable analyzer for tokenization and query expansion.
+
+    Implementations control how queries and content are tokenized and whether
+    query expansion is applied. The default PLAIN analyzer performs no
+    query expansion and uses prefix-only token matching to prevent false
+    positives from bidirectional substring matching.
+    """
+
+    @abstractmethod
+    def expand_tokens(self, tokens: set[str]) -> set[str]:
+        """Expand a set of tokens (e.g., with synonyms). Default: no-op."""
+
+    @abstractmethod
+    def tokens_match(self, query_token: str, content_token: str) -> bool:
+        """Determine if a query token matches a content token.
+
+        Default implementation uses prefix matching only to avoid
+        false positives from bidirectional substring matching (e.g., "cat"
+        matching "category", "api" matching "rapid").
+        """
+
+
+class PlainAnalyzer(Analyzer):
+    """Default analyzer: no query expansion, prefix-only token matching."""
+
+    def expand_tokens(self, tokens: set[str]) -> set[str]:
+        return tokens
+
+    def tokens_match(self, query_token: str, content_token: str) -> bool:
+        # Prefix-only matching: query token must be a prefix of content token
+        # when lengths differ. This prevents false positives like "cat" ⊂
+        # "category", "api" ⊂ "rapid", "art" ⊂ "particle".
+        if query_token == content_token:
+            return True
+        return len(query_token) >= 3 and content_token.startswith(query_token)
+
+
+class DomainAnalyzer(Analyzer):
+    """Opt-in domain analyzer with DMA-specific query expansions.
+
+    Uses the _QUERY_EXPANSIONS mapping for query expansion. Still uses
+    prefix-only token matching to prevent false positives.
+    """
+
+    def expand_tokens(self, tokens: set[str]) -> set[str]:
+        expanded = set(tokens)
+        for token in tokens:
+            expanded.update(_QUERY_EXPANSIONS.get(token, set()))
+        return expanded
+
+    def tokens_match(self, query_token: str, content_token: str) -> bool:
+        # Same prefix-only matching as PlainAnalyzer
+        if query_token == content_token:
+            return True
+        return len(query_token) >= 3 and content_token.startswith(query_token)
+
+
+def get_analyzer(kind: AnalyzerKind) -> Analyzer:
+    """Factory function to get an analyzer by kind."""
+    if kind == AnalyzerKind.PLAIN:
+        return PlainAnalyzer()
+    if kind == AnalyzerKind.DOMAIN:
+        return DomainAnalyzer()
+    raise ValueError(f"Unknown analyzer kind: {kind}")
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryRecord:
     id: str
@@ -98,8 +183,9 @@ class MemoryRecord:
 class SQLiteMemoryRepository:
     """A small persistence boundary that can later be replaced by PostgreSQL."""
 
-    def __init__(self, database_path: Path) -> None:
+    def __init__(self, database_path: Path, analyzer: Analyzer | None = None) -> None:
         self._database_path = database_path
+        self._analyzer = analyzer or PlainAnalyzer()
 
     def initialize(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -377,72 +463,74 @@ class SQLiteMemoryRepository:
             metadata=json.loads(row["metadata_json"]),
         )
 
-    @staticmethod
-    def _to_fts_query(query: str) -> str:
+    def _to_fts_query(self, query: str) -> str:
         """Convert arbitrary user text to a safe OR query for SQLite FTS5.
 
         BM25 ranks records matching more query terms above partial matches. OR prevents
         a harmless wording variation (for example, ``prefer`` vs ``prefers``) from
-        producing an empty result set before semantic retrieval is introduced.
+        producing an empty result set before semantic retrieval is introduced. Tokens
+        come from the configured analyzer so that its expansions reach candidate
+        selection rather than only the precision filter.
         """
-        tokens = SQLiteMemoryRepository._expanded_tokens(query)
+        tokens = self._expanded_tokens(query)
         terms = []
         for token in tokens:
             terms.append(f'"{token}"')
-            if len(token) > 3:
+            # Use prefix matching for tokens >= 3 chars to align with analyzer's
+            # prefix-only matching (avoids false positives from bidirectional
+            # substring matching like "cat" in "category").
+            if len(token) >= 3:
                 terms.append(f"{token}*")
         return " OR ".join(terms)
 
-    @classmethod
     def _passes_precision_filter(
-        cls, query: str, query_tokens: set[str], content: str, *, enforce_current_filter: bool = True
+        self, query: str, query_tokens: set[str], content: str, *, enforce_current_filter: bool = True
     ) -> bool:
-        if enforce_current_filter and cls._asks_for_current(query) and not cls._has_current_marker(content):
+        if enforce_current_filter and self._asks_for_current(query) and not self._has_current_marker(content):
             return False
         if not query_tokens:
             return False
-        overlap = cls._matching_tokens(query_tokens, content)
+        overlap = self._matching_tokens(query_tokens, content)
         if len(query_tokens) == 1:
             return len(overlap) == 1
         return len(overlap) >= 2 or len(overlap) / len(query_tokens) >= 0.5
 
-    @classmethod
-    def _overlap_score(cls, query_tokens: set[str], content: str) -> float:
+    def _overlap_score(self, query_tokens: set[str], content: str) -> float:
         if not query_tokens:
             return 0.0
-        return len(cls._matching_tokens(query_tokens, content)) / len(query_tokens)
+        return len(self._matching_tokens(query_tokens, content)) / len(query_tokens)
 
-    @classmethod
-    def _matching_tokens(cls, query_tokens: set[str], content: str) -> set[str]:
-        content_tokens = cls._content_tokens(content)
+    def _matching_tokens(self, query_tokens: set[str], content: str) -> set[str]:
+        """Return the query tokens the content satisfies, directly or by expansion.
+
+        An expansion match is credited to the query token it came from, so a
+        synonym-only record still counts as one match out of the query's own
+        tokens instead of diluting the overlap ratio.
+        """
+        content_tokens = self._content_tokens(content)
         return {
             query_token
             for query_token in query_tokens
-            if any(cls._tokens_match(query_token, content_token) for content_token in content_tokens)
+            if any(
+                self._analyzer.tokens_match(candidate, content_token)
+                for candidate in self._analyzer.expand_tokens({query_token})
+                for content_token in content_tokens
+            )
         }
 
-    @classmethod
-    def _important_tokens(cls, text: str) -> set[str]:
-        return cls._expand_tokens({
+    def _important_tokens(self, text: str) -> set[str]:
+        return self._analyzer.expand_tokens({
             token
-            for token in (cls._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
+            for token in (self._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
             if token and token not in _STOPWORDS and len(token) > 2
         })
 
-    @classmethod
-    def _expanded_tokens(cls, text: str) -> set[str]:
-        return cls._expand_tokens({
+    def _expanded_tokens(self, text: str) -> set[str]:
+        return self._analyzer.expand_tokens({
             token
-            for token in (cls._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
+            for token in (self._normalise_token(raw_token) for raw_token in re.findall(r"[\w]+", text, flags=re.UNICODE))
             if token and len(token) > 2
         })
-
-    @staticmethod
-    def _expand_tokens(tokens: set[str]) -> set[str]:
-        expanded = set(tokens)
-        for token in tokens:
-            expanded.update(_QUERY_EXPANSIONS.get(token, set()))
-        return expanded
 
     @classmethod
     def _content_tokens(cls, text: str) -> set[str]:
@@ -461,21 +549,11 @@ class SQLiteMemoryRepository:
             return token[:-1]
         return token
 
-    @staticmethod
-    def _tokens_match(query_token: str, content_token: str) -> bool:
-        return (
-            query_token == content_token
-            or (len(query_token) >= 3 and query_token in content_token)
-            or (len(content_token) >= 3 and content_token in query_token)
-        )
+    def _asks_for_current(self, query: str) -> bool:
+        return bool(self._important_tokens(query).intersection(_CURRENT_MARKERS) or {"now", "current", "latest"}.intersection(self._content_tokens(query)))
 
-    @classmethod
-    def _asks_for_current(cls, query: str) -> bool:
-        return bool(cls._important_tokens(query).intersection(_CURRENT_MARKERS) or {"now", "current", "latest"}.intersection(cls._content_tokens(query)))
-
-    @classmethod
-    def _has_current_marker(cls, content: str) -> bool:
-        return bool(cls._content_tokens(content).intersection(_CURRENT_MARKERS))
+    def _has_current_marker(self, content: str) -> bool:
+        return bool(self._content_tokens(content).intersection(_CURRENT_MARKERS))
 
     @staticmethod
     def _normalise_semantic(content: str) -> str:
@@ -488,9 +566,9 @@ class SQLiteMemoryRepository:
         Timestamps are stored with a fixed +00:00 offset because recall filters
         expiry inside SQL using string comparison; mixed offsets would break it.
         """
-        if value.tzinfo is not None:
-            value = value.astimezone(UTC)
-        return value.isoformat()
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC).isoformat()
+        return value.astimezone(UTC).isoformat()
 
     @staticmethod
     def _encode_cursor(record: MemoryRecord) -> str:
