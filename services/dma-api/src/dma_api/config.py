@@ -49,6 +49,10 @@ class Settings:
     analyzer_kind: AnalyzerKind = AnalyzerKind.PLAIN
     auth_limits: AuthLimits = field(default_factory=AuthLimits)
     trust_forwarded_for: bool = False
+    max_metadata_bytes: int = 16 * 1024
+    max_metadata_depth: int = 10
+    idempotency_retention_days: int = 30
+    max_request_bytes: int = 1024 * 1024
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -73,6 +77,12 @@ class Settings:
             auth_limits=limits,
             trust_forwarded_for=os.getenv("DMA_TRUST_FORWARDED_FOR", "false").lower()
             in {"1", "true", "yes"},
+            max_metadata_bytes=_positive_int_env("DMA_MAX_METADATA_BYTES", 16 * 1024),
+            max_metadata_depth=_positive_int_env("DMA_MAX_METADATA_DEPTH", 10),
+            idempotency_retention_days=_positive_int_env(
+                "DMA_IDEMPOTENCY_RETENTION_DAYS", 30
+            ),
+            max_request_bytes=_positive_int_env("DMA_MAX_REQUEST_BYTES", 1024 * 1024),
         )
         if settings.environment == "production" and settings.api_key == "dma-local-development-key":
             raise ValueError("DMA_API_KEY must be explicitly configured in production")

@@ -23,6 +23,9 @@ from fastapi import (
     Response,
     status,
 )
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from dma_api.config import AuthLimits, Settings
 from dma_api.models import (
@@ -35,10 +38,69 @@ from dma_api.models import (
     RecallResult,
     RememberRequest,
     RetrievalExplanation,
+    metadata_depth,
+    metadata_serialized_size,
 )
 from dma_api.repository import MemoryRecord, SQLiteMemoryRepository, get_analyzer
 
 logger = logging.getLogger("dma_api.auth")
+
+_PROBLEM_TITLES = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    404: "Not Found",
+    413: "Payload Too Large",
+    422: "Unprocessable Entity",
+    429: "Too Many Requests",
+    500: "Internal Server Error",
+}
+
+
+def _problem_body(
+    *,
+    request: Request | None,
+    status_code: int,
+    detail: str,
+    title: str | None = None,
+    problem_type: str | None = None,
+    errors: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    resolved_title = title or _PROBLEM_TITLES.get(status_code, "Error")
+    slug = resolved_title.lower().replace(" ", "-")
+    body: dict[str, object] = {
+        "type": problem_type or f"https://dma.dev/problems/{slug}",
+        "title": resolved_title,
+        "status": status_code,
+        "detail": detail,
+    }
+    if request is not None:
+        body["instance"] = str(request.url.path)
+    if errors is not None:
+        body["errors"] = errors
+    return body
+
+
+def _problem_response(
+    *,
+    request: Request | None,
+    status_code: int,
+    detail: str,
+    title: str | None = None,
+    problem_type: str | None = None,
+    errors: list[dict[str, object]] | None = None,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content=_problem_body(
+            request=request,
+            status_code=status_code,
+            detail=detail,
+            title=title,
+            problem_type=problem_type,
+            errors=errors,
+        ),
+        media_type="application/problem+json",
+    )
 
 
 @dataclass
@@ -137,7 +199,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Create an independently configurable API application."""
     runtime_settings = settings or Settings()
     analyzer = get_analyzer(runtime_settings.analyzer_kind)
-    repository = SQLiteMemoryRepository(runtime_settings.database_path, analyzer=analyzer)
+    repository = SQLiteMemoryRepository(
+        runtime_settings.database_path,
+        analyzer=analyzer,
+        idempotency_retention_days=runtime_settings.idempotency_retention_days,
+    )
     rate_limiter = InMemoryRateLimiter(runtime_settings.auth_limits)
 
     @asynccontextmanager
@@ -146,6 +212,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
 
     app = FastAPI(title="DMA API", version="0.1.0", lifespan=lifespan)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        status_code = exc.status_code
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        return _problem_response(request=request, status_code=status_code, detail=detail)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        errors = [
+            {"loc": list(error.get("loc", [])), "msg": error.get("msg", ""), "type": error.get("type", "")}
+            for error in exc.errors()
+        ]
+        detail = "; ".join(
+            f"{'.'.join(str(part) for part in error.get('loc', []))}: {error.get('msg', '')}"
+            for error in exc.errors()
+        ) or "request validation failed"
+        return _problem_response(
+            request=request,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=detail,
+            errors=errors,  # type: ignore[arg-type]
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception("unhandled error: %s", exc)
+        return _problem_response(
+            request=request,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="internal server error",
+        )
+
+    @app.middleware("http")
+    async def limit_request_body_size(request: Request, call_next):  # type: ignore[no-untyped-def]
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > runtime_settings.max_request_bytes:
+                    return _problem_response(
+                        request=request,
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=(
+                            f"request body exceeds {runtime_settings.max_request_bytes} bytes"
+                        ),
+                    )
+            except ValueError:
+                pass
+        return await call_next(request)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz() -> dict[str, str]:
@@ -180,6 +297,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         idempotency_key: str = Header(..., alias="Idempotency-Key", min_length=16, max_length=255),
         tenant_id: str = Depends(authenticate),
     ) -> MemoryResponse:
+        # Operational metadata budget (configurable via Settings). The model
+        # layer enforces a higher hard ceiling as a second line of defense.
+        if metadata_depth(payload.metadata) > runtime_settings.max_metadata_depth:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "metadata nesting must not exceed "
+                    f"{runtime_settings.max_metadata_depth} levels"
+                ),
+            )
+        if metadata_serialized_size(payload.metadata) > runtime_settings.max_metadata_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "metadata must not exceed "
+                    f"{runtime_settings.max_metadata_bytes} bytes when serialized"
+                ),
+            )
         now = datetime.now(UTC)
         record = MemoryRecord(
             id=f"mem_{uuid4().hex}",

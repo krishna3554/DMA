@@ -196,6 +196,10 @@ release workflow.
 | `DMA_DATABASE_PATH` | `./dma.db` | SQLite database path. |
 | `DMA_ENVIRONMENT` | `development` | Set to `production` to reject the insecure default API key. |
 | `DMA_BASE_URL` | `http://127.0.0.1:8000` | API base URL used by the example. |
+| `DMA_MAX_METADATA_BYTES` | `16384` | Operational cap on serialized metadata; larger payloads get 422 (hard ceiling 65536). |
+| `DMA_MAX_METADATA_DEPTH` | `10` | Max nesting depth for metadata; deeper payloads get 422. |
+| `DMA_IDEMPOTENCY_RETENTION_DAYS` | `30` | Retention window for idempotency keys; older rows are pruned on write. After `forget()`, replaying the same key creates a new memory. |
+| `DMA_MAX_REQUEST_BYTES` | `1048576` | Max request body size; larger bodies get 413 `application/problem+json`. |
 
 ## Repository layout
 

@@ -60,6 +60,12 @@ paths:
     post:
       operationId: recall
       summary: Retrieve memories relevant to a query
+      description: >
+        An empty `types` array behaves exactly like an omitted filter (all
+        types). Result `score` values are relative within a single response
+        only: the top hit is always 1.0 after per-query normalization, so
+        scores must not be compared across queries or treated as calibrated
+        confidence.
       requestBody:
         required: true
         content:
@@ -118,6 +124,12 @@ components:
       name: Idempotency-Key
       in: header
       required: true
+      description: >
+        Idempotency key for safe retries. Keys are retained for
+        DMA_IDEMPOTENCY_RETENTION_DAYS (default 30 days) and may be recycled
+        afterwards; replays within the window return the original memory.
+        After forget() deletes a memory and its idempotency row, replaying the
+        same key creates a new memory with a new ID.
       schema: { type: string, minLength: 16, maxLength: 255 }
     MemoryId:
       name: memory_id
@@ -142,7 +154,15 @@ components:
         content: { type: string, minLength: 1, maxLength: 20000 }
         type: { $ref: '#/components/schemas/MemoryType' }
         expires_at: { type: [string, 'null'], format: date-time }
-        metadata: { type: object, additionalProperties: true, default: {} }
+        metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+          description: >
+            Arbitrary JSON metadata. Must serialize to at most 16384 bytes
+            (operational default, configurable via DMA_MAX_METADATA_BYTES; hard
+            ceiling 65536 bytes) with nesting depth at most 10. Larger payloads
+            are rejected with 422. Request bodies above 1 MiB are rejected with 413.
     RecallRequest:
       type: object
       required: [agent_id, query]
@@ -153,6 +173,8 @@ components:
           type: array
           items: { $ref: '#/components/schemas/MemoryType' }
           uniqueItems: true
+          description: >
+            Filter by memory types. Omitted or an empty array means all types.
         limit: { type: integer, minimum: 1, maximum: 50, default: 5 }
     Memory:
       type: object
@@ -174,7 +196,14 @@ components:
         - type: object
           required: [score]
           properties:
-            score: { type: number, minimum: 0, maximum: 1 }
+            score:
+              type: number
+              minimum: 0
+              maximum: 1
+              description: >
+                Relative relevance within this single response only. Scores are
+                normalized by the top hit, so the best match is always 1.0.
+                Do not compare across queries or treat as calibrated confidence.
     RecallResponse:
       type: object
       required: [results]

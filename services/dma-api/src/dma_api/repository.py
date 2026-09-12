@@ -10,13 +10,24 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 
 from dma_api.models import MemoryType
 
 _SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
+
+# Over-fetch multiplier for recall: SQL LIMIT is widened before the Python
+# precision filter runs, so `limit` remains a guarantee on the number of
+# survivors (up to the total number of passing matches) rather than on the
+# number of BM25 candidates examined.
+_RECALL_OVERFETCH_MULTIPLIER = 5
+_RECALL_OVERFETCH_MAX = 250
+
+# Default idempotency-key retention (days). Replays are only meaningful for
+# retry windows; rows older than this are pruned opportunistically on write.
+_DEFAULT_IDEMPOTENCY_RETENTION_DAYS = 30
 
 _CURRENT_MARKERS = {"now", "current", "currently", "latest", "newer", "active"}
 _STOPWORDS = {
@@ -183,9 +194,17 @@ class MemoryRecord:
 class SQLiteMemoryRepository:
     """A small persistence boundary that can later be replaced by PostgreSQL."""
 
-    def __init__(self, database_path: Path, analyzer: Analyzer | None = None) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        analyzer: Analyzer | None = None,
+        idempotency_retention_days: int = _DEFAULT_IDEMPOTENCY_RETENTION_DAYS,
+    ) -> None:
         self._database_path = database_path
         self._analyzer = analyzer or PlainAnalyzer()
+        if idempotency_retention_days < 1:
+            raise ValueError("idempotency_retention_days must be a positive integer")
+        self._idempotency_retention_days = idempotency_retention_days
 
     def initialize(self) -> None:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +217,7 @@ class SQLiteMemoryRepository:
                     tenant_id TEXT NOT NULL,
                     agent_id TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    content_normalized TEXT,
                     type TEXT NOT NULL CHECK(type IN ('episodic', 'semantic', 'procedural')),
                     version INTEGER NOT NULL CHECK(version >= 1),
                     created_at TEXT NOT NULL,
@@ -220,10 +240,80 @@ class SQLiteMemoryRepository:
                     operation TEXT NOT NULL,
                     idempotency_key TEXT NOT NULL,
                     memory_id TEXT NOT NULL REFERENCES memories(id),
+                    created_at TEXT NOT NULL,
                     PRIMARY KEY (tenant_id, operation, idempotency_key)
                 );
                 """
             )
+            # Indexes on the new columns are created inside the migrate helpers
+            # (after ALTER TABLE backfills) so legacy databases without those
+            # columns do not fail at CREATE INDEX time.
+            self._migrate_memories_content_normalized(connection)
+            self._migrate_idempotency_created_at(connection)
+
+    @staticmethod
+    def _migrate_memories_content_normalized(connection: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(memories)").fetchall()}
+        if "content_normalized" not in columns:
+            connection.execute("ALTER TABLE memories ADD COLUMN content_normalized TEXT")
+        # Backfill legacy rows (including pre-index databases) so the indexed
+        # dedup lookup sees identical semantics to the old full-table scan.
+        rows = connection.execute(
+            "SELECT id, content FROM memories WHERE content_normalized IS NULL"
+        ).fetchall()
+        for row in rows:
+            normalized = SQLiteMemoryRepository._normalise_semantic(row["content"])
+            connection.execute(
+                "UPDATE memories SET content_normalized = ? WHERE id = ?",
+                (normalized, row["id"]),
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_memories_semantic_dedup"
+            " ON memories(tenant_id, agent_id, type, content_normalized)"
+        )
+
+    @staticmethod
+    def _migrate_idempotency_created_at(connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(idempotency_keys)").fetchall()
+        }
+        if "created_at" not in columns:
+            connection.execute("ALTER TABLE idempotency_keys ADD COLUMN created_at TEXT")
+        # Backfill from the linked memory's creation time so retained age is
+        # meaningful; fall back to now for orphaned rows.
+        connection.execute(
+            """
+            UPDATE idempotency_keys
+            SET created_at = (
+                SELECT created_at FROM memories WHERE memories.id = idempotency_keys.memory_id
+            )
+            WHERE created_at IS NULL
+            """
+        )
+        now_iso = SQLiteMemoryRepository._utc_isoformat(datetime.now(UTC))
+        connection.execute(
+            "UPDATE idempotency_keys SET created_at = ? WHERE created_at IS NULL",
+            (now_iso,),
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_idempotency_keys_created_at"
+            " ON idempotency_keys(created_at)"
+        )
+
+    def _prune_expired_idempotency_keys(
+        self, connection: sqlite3.Connection, now: datetime
+    ) -> int:
+        """Delete idempotency rows older than the retention window.
+
+        Returns the number of rows removed. Runs inside the caller's
+        transaction so the write path pays one cheap indexed DELETE.
+        """
+        cutoff = now - timedelta(days=self._idempotency_retention_days)
+        cursor = connection.execute(
+            "DELETE FROM idempotency_keys WHERE created_at < ?",
+            (self._utc_isoformat(cutoff),),
+        )
+        return cursor.rowcount if cursor.rowcount is not None else 0
 
     def create_or_get(self, record: MemoryRecord, idempotency_key: str) -> tuple[MemoryRecord, bool]:
         """Create a record, or return the result of an exact idempotent replay."""
@@ -239,8 +329,16 @@ class SQLiteMemoryRepository:
             if existing is not None:
                 return self._get_by_id(connection, existing["memory_id"]), False
 
+            # Opportunistic TTL sweep so the table cannot grow without bound
+            # on long-running single-node deployments.
+            self._prune_expired_idempotency_keys(connection, record.created_at)
+
+            normalized_content = self._normalise_semantic(record.content)
+            now_iso = self._utc_isoformat(record.created_at)
             if record.type is MemoryType.SEMANTIC:
-                duplicate = self._find_normalized_semantic(connection, record)
+                duplicate = self._find_normalized_semantic(
+                    connection, record, normalized_content
+                )
                 if duplicate is not None:
                     updated = MemoryRecord(
                         id=duplicate.id,
@@ -255,26 +353,27 @@ class SQLiteMemoryRepository:
                         metadata=record.metadata,
                     )
                     connection.execute(
-                        """UPDATE memories SET content = ?, version = ?, updated_at = ?, expires_at = ?, metadata_json = ? WHERE id = ?""",
-                        (updated.content, updated.version, self._utc_isoformat(updated.updated_at), self._utc_isoformat(updated.expires_at) if updated.expires_at else None, json.dumps(updated.metadata, separators=(",", ":"), sort_keys=True), updated.id),
+                        """UPDATE memories SET content = ?, content_normalized = ?, version = ?, updated_at = ?, expires_at = ?, metadata_json = ? WHERE id = ?""",
+                        (updated.content, normalized_content, updated.version, self._utc_isoformat(updated.updated_at), self._utc_isoformat(updated.expires_at) if updated.expires_at else None, json.dumps(updated.metadata, separators=(",", ":"), sort_keys=True), updated.id),
                     )
                     connection.execute("DELETE FROM memory_search WHERE memory_id = ?", (updated.id,))
                     connection.execute("INSERT INTO memory_search (content, memory_id, tenant_id, agent_id, type) VALUES (?, ?, ?, ?, ?)", (updated.content, updated.id, updated.tenant_id, updated.agent_id, updated.type.value))
-                    connection.execute("INSERT INTO idempotency_keys (tenant_id, operation, idempotency_key, memory_id) VALUES (?, 'remember', ?, ?)", (record.tenant_id, idempotency_key, updated.id))
+                    connection.execute("INSERT INTO idempotency_keys (tenant_id, operation, idempotency_key, memory_id, created_at) VALUES (?, 'remember', ?, ?, ?)", (record.tenant_id, idempotency_key, updated.id, now_iso))
                     return updated, False
 
             connection.execute(
                 """
                 INSERT INTO memories (
-                    id, tenant_id, agent_id, content, type, version,
+                    id, tenant_id, agent_id, content, content_normalized, type, version,
                     created_at, updated_at, expires_at, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
                     record.tenant_id,
                     record.agent_id,
                     record.content,
+                    normalized_content,
                     record.type.value,
                     record.version,
                     self._utc_isoformat(record.created_at),
@@ -292,21 +391,34 @@ class SQLiteMemoryRepository:
             )
             connection.execute(
                 """
-                INSERT INTO idempotency_keys (tenant_id, operation, idempotency_key, memory_id)
-                VALUES (?, 'remember', ?, ?)
+                INSERT INTO idempotency_keys (tenant_id, operation, idempotency_key, memory_id, created_at)
+                VALUES (?, 'remember', ?, ?, ?)
                 """,
-                (record.tenant_id, idempotency_key, record.id),
+                (record.tenant_id, idempotency_key, record.id, now_iso),
             )
             return record, True
 
-    def _find_normalized_semantic(self, connection: sqlite3.Connection, record: MemoryRecord) -> MemoryRecord | None:
-        rows = connection.execute("SELECT * FROM memories WHERE tenant_id = ? AND agent_id = ? AND type = 'semantic'", (record.tenant_id, record.agent_id)).fetchall()
-        normalized = self._normalise_semantic(record.content)
-        for row in rows:
-            candidate = self._row_to_record(row)
-            if self._normalise_semantic(candidate.content) == normalized:
-                return candidate
-        return None
+    def _find_normalized_semantic(
+        self,
+        connection: sqlite3.Connection,
+        record: MemoryRecord,
+        normalized: str | None = None,
+    ) -> MemoryRecord | None:
+        """Find an exact normalized duplicate via an indexed equality lookup.
+
+        Replaces the former O(N) full-table scan (load every semantic row for
+        the tenant/agent inside BEGIN IMMEDIATE) with an indexed query on
+        (tenant_id, agent_id, type, content_normalized), keeping identical
+        dedup semantics while making the write path O(1)-ish.
+        """
+        normalized = normalized if normalized is not None else self._normalise_semantic(record.content)
+        row = connection.execute(
+            "SELECT * FROM memories WHERE tenant_id = ? AND agent_id = ? AND type = 'semantic' AND content_normalized = ? LIMIT 1",
+            (record.tenant_id, record.agent_id, normalized),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_record(row)
 
     def recall(
         self,
@@ -318,10 +430,21 @@ class SQLiteMemoryRepository:
         limit: int,
         now: datetime,
     ) -> list[tuple[MemoryRecord, float]]:
-        """Return lexical matches visible to the agent, ordered by FTS relevance."""
+        """Return lexical matches visible to the agent, ordered by FTS relevance.
+
+        An empty ``types`` list is treated exactly like ``None`` (all types).
+        Scores are relative within a single response: post-ranking, every
+        score is divided by the max relevance of that result set, so the top
+        hit is always 1.0. Scores must not be compared across queries or used
+        as calibrated confidence thresholds.
+        """
         search_query = self._to_fts_query(query)
         if not search_query:
             return []
+
+        # Explicit empty-list handling: [] means "all types", matching the
+        # OpenAPI contract and the historical `if types:` behavior.
+        effective_types = types if types else None
 
         where = [
             "memory_search MATCH ?",
@@ -330,11 +453,16 @@ class SQLiteMemoryRepository:
             "(m.expires_at IS NULL OR m.expires_at > ?)",
         ]
         parameters: list[object] = [search_query, tenant_id, agent_id, self._utc_isoformat(now)]
-        if types:
-            placeholders = ", ".join("?" for _ in types)
+        if effective_types:
+            placeholders = ", ".join("?" for _ in effective_types)
             where.append(f"m.type IN ({placeholders})")
-            parameters.extend(memory_type.value for memory_type in types)
-        parameters.append(limit)
+            parameters.extend(memory_type.value for memory_type in effective_types)
+        # Over-fetch before the Python precision filter so `limit` bounds the
+        # survivors, not the BM25 candidates. Without this, top-N rows dropped
+        # by the filter would waste slots even when valid matches exist beyond
+        # rank N.
+        fetch_limit = min(limit * _RECALL_OVERFETCH_MULTIPLIER, _RECALL_OVERFETCH_MAX)
+        parameters.append(fetch_limit)
 
         statement = f"""
             SELECT m.*, -bm25(memory_search) AS relevance
@@ -361,6 +489,8 @@ class SQLiteMemoryRepository:
                 break
         if not records_with_relevance:
             return []
+        # Preserve BM25 ranking; trim over-fetched survivors to the caller limit.
+        records_with_relevance = records_with_relevance[:limit]
         top_relevance = max(relevance for _, relevance in records_with_relevance)
         if top_relevance == 0:
             return [(record, 0.0) for record, _ in records_with_relevance]
