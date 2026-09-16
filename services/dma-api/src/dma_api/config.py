@@ -67,7 +67,8 @@ class Settings:
         try:
             analyzer_kind = AnalyzerKind(analyzer_kind_str)
         except ValueError:
-            analyzer_kind = AnalyzerKind.PLAIN
+            allowed = ", ".join(sorted(kind.value for kind in AnalyzerKind))
+            raise ValueError(f"DMA_ANALYZER_KIND must be one of: {allowed}, got {analyzer_kind_str!r}")
         settings = cls(
             database_path=Path(os.getenv("DMA_DATABASE_PATH", "./dma.db")),
             api_key=os.getenv("DMA_API_KEY", "dma-local-development-key"),

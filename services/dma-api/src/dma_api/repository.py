@@ -327,7 +327,16 @@ class SQLiteMemoryRepository:
                 (record.tenant_id, idempotency_key),
             ).fetchone()
             if existing is not None:
-                return self._get_by_id(connection, existing["memory_id"]), False
+                try:
+                    return self._get_by_id(connection, existing["memory_id"], record.tenant_id), False
+                except RuntimeError:
+                    # Orphaned idempotency row (memory deleted out-of-band or
+                    # raced with delete). Drop the stale row and treat this
+                    # as a new write instead of surfacing a 500.
+                    connection.execute(
+                        "DELETE FROM idempotency_keys WHERE tenant_id = ? AND operation = 'remember' AND idempotency_key = ?",
+                        (record.tenant_id, idempotency_key),
+                    )
 
             # Opportunistic TTL sweep so the table cannot grow without bound
             # on long-running single-node deployments.
@@ -549,8 +558,14 @@ class SQLiteMemoryRepository:
             if existing is None:
                 return False
             connection.execute("DELETE FROM memory_search WHERE memory_id = ?", (memory_id,))
-            connection.execute("DELETE FROM idempotency_keys WHERE memory_id = ?", (memory_id,))
-            connection.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            connection.execute(
+                "DELETE FROM idempotency_keys WHERE memory_id = ? AND tenant_id = ?",
+                (memory_id, tenant_id),
+            )
+            connection.execute(
+                "DELETE FROM memories WHERE id = ? AND tenant_id = ?",
+                (memory_id, tenant_id),
+            )
             return True
 
     def _connect(self) -> sqlite3.Connection:
@@ -572,8 +587,10 @@ class SQLiteMemoryRepository:
             connection.close()
 
     @staticmethod
-    def _get_by_id(connection: sqlite3.Connection, memory_id: str) -> MemoryRecord:
-        row = connection.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
+    def _get_by_id(connection: sqlite3.Connection, memory_id: str, tenant_id: str) -> MemoryRecord:
+        row = connection.execute(
+            "SELECT * FROM memories WHERE id = ? AND tenant_id = ?", (memory_id, tenant_id)
+        ).fetchone()
         if row is None:
             raise RuntimeError("idempotency record references a missing memory")
         return SQLiteMemoryRepository._row_to_record(row)

@@ -335,17 +335,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/memories/recall", response_model=RecallResponse)
     def recall(payload: RecallRequest, tenant_id: str = Depends(authenticate)) -> RecallResponse:
+        now = datetime.now(UTC)
         matches = repository.recall(
             tenant_id=tenant_id,
             agent_id=payload.agent_id,
             query=payload.query,
             types=payload.types,
             limit=payload.limit,
-            now=datetime.now(UTC),
+            now=now,
         )
         return RecallResponse(
             results=[
-                RecallResult(**_to_memory_response(memory, datetime.now(UTC)).model_dump(), score=score)
+                RecallResult(**_to_memory_response(memory, now).model_dump(), score=score)
                 for memory, score in matches
             ]
         )
@@ -387,7 +388,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def explain(
         memory_id: str = Path(pattern=r"^mem_[A-Za-z0-9]+$"),
         agent_id: str = Query(min_length=1, max_length=128),
-        query: str | None = Query(default=None, max_length=20_000),
+        query: str | None = Query(default=None, min_length=1, max_length=20_000),
         tenant_id: str = Depends(authenticate),
     ) -> MemoryExplanation:
         memory = repository.get(tenant_id=tenant_id, agent_id=agent_id, memory_id=memory_id)

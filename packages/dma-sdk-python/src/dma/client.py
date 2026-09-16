@@ -86,6 +86,8 @@ class DMAClient:
             "metadata": dict(metadata or {}),
         }
         if expires_at is not None:
+            if expires_at.tzinfo is None:
+                raise ValidationError("expires_at must be timezone-aware")
             payload["expires_at"] = expires_at.isoformat()
         response = self._request(
             "POST", "v1/memories", json=payload, headers={"Idempotency-Key": key}, retryable=True
