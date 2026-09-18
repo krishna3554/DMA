@@ -28,4 +28,15 @@ class DMATools:
 
 
 def _memory(item: Memory | RecallResult) -> dict[str, Any]:
-    return {"id": item.id, "agent_id": item.agent_id, "content": item.content, "type": item.type.value, "version": item.version, "status": item.status, "metadata": item.metadata}
+    return {
+        "id": item.id,
+        "agent_id": item.agent_id,
+        "content": item.content,
+        "type": item.type.value,
+        "version": item.version,
+        "status": item.status,
+        "metadata": item.metadata,
+        "created_at": item.created_at.isoformat(),
+        "updated_at": item.updated_at.isoformat(),
+        "expires_at": item.expires_at.isoformat() if item.expires_at else None,
+    }
