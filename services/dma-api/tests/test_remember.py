@@ -82,3 +82,40 @@ def test_remember_rejects_a_wrong_api_key(tmp_path) -> None:
         )
 
     assert response.status_code == 401
+
+
+def test_idempotency_keys_are_scoped_to_the_agent(tmp_path) -> None:
+    """Two agents reusing one key must not resolve to each other's memory."""
+    app = create_app(Settings(database_path=tmp_path / "dma.db", api_key="test-key", tenant_id="tenant-a"))
+    key = "shared-write-key-01"
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/memories",
+            headers={"Authorization": "Bearer test-key", "Idempotency-Key": key},
+            json={"agent_id": "agent-a", "content": "Agent A prefers pytest.", "type": "episodic"},
+        )
+        second = client.post(
+            "/v1/memories",
+            headers={"Authorization": "Bearer test-key", "Idempotency-Key": key},
+            json={"agent_id": "agent-b", "content": "Agent B prefers vitest.", "type": "episodic"},
+        )
+        replay = client.post(
+            "/v1/memories",
+            headers={"Authorization": "Bearer test-key", "Idempotency-Key": key},
+            json={"agent_id": "agent-a", "content": "Agent A prefers pytest.", "type": "episodic"},
+        )
+        recall_b = client.post(
+            "/v1/memories/recall",
+            headers={"Authorization": "Bearer test-key"},
+            json={"agent_id": "agent-b", "query": "What does agent B prefer?"},
+        )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json()["id"] != first.json()["id"]
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first.json()["id"]
+    assert recall_b.status_code == 200
+    recalled_ids = {item["id"] for item in recall_b.json()["results"]}
+    assert second.json()["id"] in recalled_ids
+    assert first.json()["id"] not in recalled_ids

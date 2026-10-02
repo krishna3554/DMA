@@ -26,6 +26,7 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import Message
 
 from dma_api.config import AuthLimits, Settings
 from dma_api.models import (
@@ -101,6 +102,45 @@ def _problem_response(
         ),
         media_type="application/problem+json",
     )
+
+
+async def _read_bounded_body(request: Request, max_bytes: int) -> tuple[bytes, bool]:
+    """Read the request body up to one byte past ``max_bytes``.
+
+    Returns the bytes read and whether the limit was exceeded. Reading stops
+    as soon as the limit is crossed, so an unbounded chunked stream can never
+    force more than ``max_bytes + 1`` bytes into memory here.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            break
+        chunk = message.get("body", b"")
+        total += len(chunk)
+        if total > max_bytes:
+            return b"", True
+        chunks.append(chunk)
+        if not message.get("more_body", False):
+            break
+    return b"".join(chunks), False
+
+
+def _replay_receive(body: bytes):  # type: ignore[no-untyped-def]
+    """Build a receive channel that replays an already-read body downstream."""
+    sent = False
+
+    async def replay() -> Message:
+        nonlocal sent
+        if sent:
+            # The body is fully delivered; report no further body so downstream
+            # reads terminate instead of hanging on a consumed stream.
+            return {"type": "http.request", "body": b"", "more_body": False}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return replay
 
 
 @dataclass
@@ -249,6 +289,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def limit_request_body_size(request: Request, call_next):  # type: ignore[no-untyped-def]
+        # Fast path: reject on the declared length without reading the body.
         content_length = request.headers.get("content-length")
         if content_length is not None:
             try:
@@ -262,6 +303,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
             except ValueError:
                 pass
+        # Slow path: the declared length is absent (for example chunked
+        # transfer encoding), unparsable, or within the limit but untrusted.
+        # Count the bytes actually read, bounded at one byte past the limit,
+        # and replay them downstream so handlers see an intact body.
+        body, too_large = await _read_bounded_body(request, runtime_settings.max_request_bytes)
+        if too_large:
+            return _problem_response(
+                request=request,
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"request body exceeds {runtime_settings.max_request_bytes} bytes"
+                ),
+            )
+        request._receive = _replay_receive(body)
         return await call_next(request)
 
     @app.get("/healthz", include_in_schema=False)
