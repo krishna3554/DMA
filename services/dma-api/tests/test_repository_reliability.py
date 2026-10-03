@@ -142,6 +142,11 @@ def _legacy_database(path) -> None:
             " VALUES ('tenant-a', 'remember', 'legacy-shared-key-01', 'mem_legacy00000000000001', ?)",
             (now,),
         )
+        connection.execute(
+            "INSERT INTO idempotency_keys (tenant_id, operation, idempotency_key, memory_id, created_at)"
+            " VALUES ('tenant-a', 'remember', 'legacy-orphan-key-001', 'mem_missing00000000000001', ?)",
+            (now,),
+        )
 
 
 def test_initialize_scopes_legacy_idempotency_keys_to_the_agent(tmp_path) -> None:
@@ -158,6 +163,13 @@ def test_initialize_scopes_legacy_idempotency_keys_to_the_agent(tmp_path) -> Non
 
     assert {"tenant_id", "agent_id", "operation", "idempotency_key"} <= key_columns
     assert owner == "coding-agent"
+
+    with sqlite3.connect(database_path) as connection:
+        orphans = connection.execute(
+            "SELECT COUNT(*) FROM idempotency_keys WHERE idempotency_key = 'legacy-orphan-key-001'"
+        ).fetchone()[0]
+
+    assert orphans == 0
 
     from datetime import UTC, datetime
 
