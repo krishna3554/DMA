@@ -237,11 +237,12 @@ class SQLiteMemoryRepository:
                 );
                 CREATE TABLE IF NOT EXISTS idempotency_keys (
                     tenant_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
                     operation TEXT NOT NULL,
                     idempotency_key TEXT NOT NULL,
                     memory_id TEXT NOT NULL REFERENCES memories(id),
                     created_at TEXT NOT NULL,
-                    PRIMARY KEY (tenant_id, operation, idempotency_key)
+                    PRIMARY KEY (tenant_id, agent_id, operation, idempotency_key)
                 );
                 """
             )
@@ -250,6 +251,7 @@ class SQLiteMemoryRepository:
             # columns do not fail at CREATE INDEX time.
             self._migrate_memories_content_normalized(connection)
             self._migrate_idempotency_created_at(connection)
+            self._migrate_idempotency_agent_scope(connection)
 
     @staticmethod
     def _migrate_memories_content_normalized(connection: sqlite3.Connection) -> None:
@@ -300,6 +302,69 @@ class SQLiteMemoryRepository:
             " ON idempotency_keys(created_at)"
         )
 
+    @staticmethod
+    def _migrate_idempotency_agent_scope(connection: sqlite3.Connection) -> None:
+        """Scope idempotency keys to (tenant_id, agent_id).
+
+        Databases created before this change key idempotency rows by
+        (tenant_id, operation, idempotency_key) only, so two agents reusing
+        the same key would resolve to each other's memory. The migration
+        backfills the owning agent from the linked memory row, drops orphaned
+        rows whose memory is gone, and rebuilds the table with the scoped
+        primary key. It is a no-op on databases that already have it.
+        """
+        table_info = connection.execute("PRAGMA table_info(idempotency_keys)").fetchall()
+        key_columns = {row["name"] for row in table_info if row["pk"] > 0}
+        if {"tenant_id", "agent_id", "operation", "idempotency_key"} <= key_columns:
+            return
+        if "agent_id" not in {row["name"] for row in table_info}:
+            connection.execute("ALTER TABLE idempotency_keys ADD COLUMN agent_id TEXT")
+        # Attribute each surviving row to the agent that owns its memory.
+        connection.execute(
+            """
+            UPDATE idempotency_keys
+            SET agent_id = (
+                SELECT agent_id FROM memories WHERE memories.id = idempotency_keys.memory_id
+            )
+            WHERE agent_id IS NULL
+            """
+        )
+        # Orphaned rows reference no memory and can never replay; the write
+        # path already treats them as new writes, so drop them here.
+        connection.execute(
+            """
+            DELETE FROM idempotency_keys
+            WHERE agent_id IS NULL
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE idempotency_keys_new (
+                tenant_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                memory_id TEXT NOT NULL REFERENCES memories(id),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, agent_id, operation, idempotency_key)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO idempotency_keys_new
+                (tenant_id, agent_id, operation, idempotency_key, memory_id, created_at)
+            SELECT tenant_id, agent_id, operation, idempotency_key, memory_id, created_at
+            FROM idempotency_keys
+            """
+        )
+        connection.execute("DROP TABLE idempotency_keys")
+        connection.execute("ALTER TABLE idempotency_keys_new RENAME TO idempotency_keys")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_idempotency_keys_created_at"
+            " ON idempotency_keys(created_at)"
+        )
+
     def _prune_expired_idempotency_keys(
         self, connection: sqlite3.Connection, now: datetime
     ) -> int:
@@ -322,20 +387,22 @@ class SQLiteMemoryRepository:
             existing = connection.execute(
                 """
                 SELECT memory_id FROM idempotency_keys
-                WHERE tenant_id = ? AND operation = 'remember' AND idempotency_key = ?
+                WHERE tenant_id = ? AND agent_id = ? AND operation = 'remember' AND idempotency_key = ?
                 """,
-                (record.tenant_id, idempotency_key),
+                (record.tenant_id, record.agent_id, idempotency_key),
             ).fetchone()
             if existing is not None:
                 try:
-                    return self._get_by_id(connection, existing["memory_id"], record.tenant_id), False
+                    return self._get_by_id(
+                        connection, existing["memory_id"], record.tenant_id, record.agent_id
+                    ), False
                 except RuntimeError:
                     # Orphaned idempotency row (memory deleted out-of-band or
                     # raced with delete). Drop the stale row and treat this
                     # as a new write instead of surfacing a 500.
                     connection.execute(
-                        "DELETE FROM idempotency_keys WHERE tenant_id = ? AND operation = 'remember' AND idempotency_key = ?",
-                        (record.tenant_id, idempotency_key),
+                        "DELETE FROM idempotency_keys WHERE tenant_id = ? AND agent_id = ? AND operation = 'remember' AND idempotency_key = ?",
+                        (record.tenant_id, record.agent_id, idempotency_key),
                     )
 
             # Opportunistic TTL sweep so the table cannot grow without bound
@@ -367,7 +434,7 @@ class SQLiteMemoryRepository:
                     )
                     connection.execute("DELETE FROM memory_search WHERE memory_id = ?", (updated.id,))
                     connection.execute("INSERT INTO memory_search (content, memory_id, tenant_id, agent_id, type) VALUES (?, ?, ?, ?, ?)", (updated.content, updated.id, updated.tenant_id, updated.agent_id, updated.type.value))
-                    connection.execute("INSERT INTO idempotency_keys (tenant_id, operation, idempotency_key, memory_id, created_at) VALUES (?, 'remember', ?, ?, ?)", (record.tenant_id, idempotency_key, updated.id, now_iso))
+                    connection.execute("INSERT INTO idempotency_keys (tenant_id, agent_id, operation, idempotency_key, memory_id, created_at) VALUES (?, ?, 'remember', ?, ?, ?)", (record.tenant_id, record.agent_id, idempotency_key, updated.id, now_iso))
                     return updated, False
 
             connection.execute(
@@ -400,10 +467,10 @@ class SQLiteMemoryRepository:
             )
             connection.execute(
                 """
-                INSERT INTO idempotency_keys (tenant_id, operation, idempotency_key, memory_id, created_at)
-                VALUES (?, 'remember', ?, ?, ?)
+                INSERT INTO idempotency_keys (tenant_id, agent_id, operation, idempotency_key, memory_id, created_at)
+                VALUES (?, ?, 'remember', ?, ?, ?)
                 """,
-                (record.tenant_id, idempotency_key, record.id, now_iso),
+                (record.tenant_id, record.agent_id, idempotency_key, record.id, now_iso),
             )
             return record, True
 
@@ -559,8 +626,8 @@ class SQLiteMemoryRepository:
                 return False
             connection.execute("DELETE FROM memory_search WHERE memory_id = ?", (memory_id,))
             connection.execute(
-                "DELETE FROM idempotency_keys WHERE memory_id = ? AND tenant_id = ?",
-                (memory_id, tenant_id),
+                "DELETE FROM idempotency_keys WHERE memory_id = ? AND tenant_id = ? AND agent_id = ?",
+                (memory_id, tenant_id, agent_id),
             )
             connection.execute(
                 "DELETE FROM memories WHERE id = ? AND tenant_id = ?",
@@ -587,9 +654,12 @@ class SQLiteMemoryRepository:
             connection.close()
 
     @staticmethod
-    def _get_by_id(connection: sqlite3.Connection, memory_id: str, tenant_id: str) -> MemoryRecord:
+    def _get_by_id(
+        connection: sqlite3.Connection, memory_id: str, tenant_id: str, agent_id: str
+    ) -> MemoryRecord:
         row = connection.execute(
-            "SELECT * FROM memories WHERE id = ? AND tenant_id = ?", (memory_id, tenant_id)
+            "SELECT * FROM memories WHERE id = ? AND tenant_id = ? AND agent_id = ?",
+            (memory_id, tenant_id, agent_id),
         ).fetchone()
         if row is None:
             raise RuntimeError("idempotency record references a missing memory")
