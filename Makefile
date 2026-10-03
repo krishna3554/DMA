@@ -18,7 +18,7 @@ classify-benchmark:
 	$(API_PYTHON) -m benchmarks.runner.classification
 
 benchmark-gated: benchmark classify-benchmark
-	$(API_PYTHON) -m benchmarks.runner.memory_eval --failures-output benchmarks/results/v0.1-failures.jsonl --baseline benchmarks/results/v0.1-failures.jsonl --fail
+	tmpfile="$$(mktemp)" && $(API_PYTHON) -m benchmarks.runner.memory_eval --failures-output "$$tmpfile" --baseline benchmarks/results/v0.1-failures.jsonl --fail; status=$$?; rm -f "$$tmpfile"; exit $$status
 
 generate-memory-eval:
 	$(API_PYTHON) -m benchmarks.runner.generate_memory_eval
