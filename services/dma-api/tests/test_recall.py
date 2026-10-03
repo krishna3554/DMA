@@ -213,3 +213,69 @@ def test_naive_expiry_is_treated_as_utc(tmp_path) -> None:
     )
 
     assert [record.id for record, _ in matches] == ["mem_naiveexpiry000000000000001"]
+
+
+def test_fts_query_term_order_is_seed_independent(tmp_path) -> None:
+    """The FTS OR query must not depend on hash-seed set iteration order.
+
+    Run with ``PYTHONHASHSEED=2``: the pre-fix construction emitted terms in
+    set order and produced an unsorted disjunction for this query.
+    """
+    from dma_api.repository import get_analyzer
+
+    repository = SQLiteMemoryRepository(
+        tmp_path / "dma.db", analyzer=get_analyzer(AnalyzerKind.DOMAIN)
+    )
+    query = repository._to_fts_query("what package contains the LangGraph adapter?")
+    disjuncts = [term.strip('"') for term in query.replace("*", "").split(" OR ")]
+    assert disjuncts == sorted(disjuncts)
+
+
+def test_ranking_is_stable_for_near_tie_candidates(tmp_path) -> None:
+    """Two close candidates must rank in the same order whatever the hash seed.
+
+    Under ``PYTHONHASHSEED=2`` the pre-fix query string scored
+    ``distractor-016-mem-01`` above ``distractor-016-mem-02``; every other
+    observed seed ranked them the other way around.
+    """
+    from dma_api.repository import get_analyzer
+
+    now = datetime(2026, 8, 1, tzinfo=UTC)
+    repository = SQLiteMemoryRepository(
+        tmp_path / "dma.db", analyzer=get_analyzer(AnalyzerKind.DOMAIN)
+    )
+    repository.initialize()
+    memories = [
+        ("distractor-016-mem-01", "The SDK package is dma-sdk."),
+        ("distractor-016-mem-02", "The LangGraph package is dma-langgraph."),
+    ]
+    for index, (memory_id, content) in enumerate(memories):
+        repository.create_or_get(
+            MemoryRecord(
+                id=memory_id,
+                tenant_id="tenant-a",
+                agent_id="coding-agent",
+                content=content,
+                type=MemoryType.SEMANTIC,
+                version=1,
+                created_at=now.replace(microsecond=index),
+                updated_at=now.replace(microsecond=index),
+                expires_at=None,
+                metadata={},
+            ),
+            f"ranking-stability-{index:04d}",
+        )
+
+    matches = repository.recall(
+        tenant_id="tenant-a",
+        agent_id="coding-agent",
+        query="what package contains the LangGraph adapter?",
+        types=None,
+        limit=3,
+        now=now,
+    )
+
+    assert [record.id for record, _ in matches] == [
+        "distractor-016-mem-02",
+        "distractor-016-mem-01",
+    ]

@@ -685,13 +685,15 @@ class SQLiteMemoryRepository:
 
         BM25 ranks records matching more query terms above partial matches. OR prevents
         a harmless wording variation (for example, ``prefer`` vs ``prefers``) from
-        producing an empty result set before semantic retrieval is introduced. Tokens
+        producing an empty result set before semantic retrieval is introduced.         Tokens
         come from the configured analyzer so that its expansions reach candidate
-        selection rather than only the precision filter.
+        selection rather than only the precision filter. Terms are emitted in
+        sorted order so the query string (and hence BM25 scoring) does not
+        depend on hash-seed-dependent set iteration order.
         """
         tokens = self._expanded_tokens(query)
         terms = []
-        for token in tokens:
+        for token in sorted(tokens):
             terms.append(f'"{token}"')
             # Use prefix matching for tokens >= 3 chars to align with analyzer's
             # prefix-only matching (avoids false positives from bidirectional
